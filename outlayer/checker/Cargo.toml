@@ -1,0 +1,21 @@
+[package]
+name = "proofstream-checker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "proofstream-checker"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasi-http-client = "0.2.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
