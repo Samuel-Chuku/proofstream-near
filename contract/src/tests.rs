@@ -473,6 +473,120 @@ fn accounting_is_unchanged_by_a_refusal() {
     assert_eq!((m.budget.0, m.fee_remaining.0), (BUDGET, FEE));
 }
 
+// Verifier fee (Q6)
+
+const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn pay_verifier(c: &mut Contract, id: u64, caller: &str) {
+    set(caller, MIN_VERIFIER_DEPOSIT);
+    let _ = c.pay_verifier(id, SHA_A.to_string(), SHA_B.to_string());
+}
+
+#[test]
+fn fee_is_spent_from_the_milestone_never_the_budget() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    pay_verifier(&mut c, id, "funder.testnet");
+    let m = c.get_milestone(id).unwrap();
+    assert_eq!(m.fee_remaining.0, FEE - VERIFIER_FEE);
+    assert_eq!(m.budget.0, BUDGET);
+    assert_eq!(m.status, Status::Funded);
+}
+
+#[test]
+#[should_panic(expected = "only the funder can spend the fee")]
+fn only_the_funder_can_spend_the_fee() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    pay_verifier(&mut c, id, "anyone.testnet");
+}
+
+#[test]
+#[should_panic(expected = "attach at least 0.03 NEAR")]
+fn verifier_needs_a_deposit_for_compute() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    set("funder.testnet", MIN_CLAIM_DEPOSIT);
+    let _ = c.pay_verifier(id, SHA_A.to_string(), SHA_B.to_string());
+}
+
+#[test]
+#[should_panic(expected = "bad sha")]
+fn verifier_refuses_a_bad_sha() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    set("funder.testnet", MIN_VERIFIER_DEPOSIT);
+    let _ = c.pay_verifier(id, "main".to_string(), SHA_B.to_string());
+}
+
+#[test]
+#[should_panic(expected = "fee exhausted")]
+fn fee_cannot_be_overspent() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    for _ in 0..=(FEE / VERIFIER_FEE) {
+        pay_verifier(&mut c, id, "funder.testnet");
+    }
+}
+
+fn fee_deposit_result(result: PromiseResult, id: u64, c: &mut Contract) {
+    set_callback(result);
+    c.on_fee_deposited(id, SHA_A.to_string(), SHA_B.to_string(), acc("funder.testnet"), MIN_VERIFIER_DEPOSIT);
+}
+
+#[test]
+fn failed_fee_deposit_restores_the_fee_and_returns_the_near() {
+    for result in [PromiseResult::Failed, PromiseResult::Successful(b"\"0\"".to_vec())] {
+        let mut c = new_contract();
+        let id = funded(&mut c);
+        pay_verifier(&mut c, id, "funder.testnet");
+        fee_deposit_result(result, id, &mut c);
+        assert_eq!(c.get_milestone(id).unwrap().fee_remaining.0, FEE);
+        let receipts = near_sdk::test_utils::get_created_receipts();
+        assert!(receipts.iter().any(|r| r.receiver_id == acc("funder.testnet")));
+        assert!(!receipts.iter().any(|r| r.receiver_id == acc("outlayer.testnet")), "no execution");
+    }
+}
+
+#[test]
+fn deposited_fee_calls_the_pinned_verifier_with_attached_usd() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    pay_verifier(&mut c, id, "funder.testnet");
+    fee_deposit_result(PromiseResult::Successful(format!("\"{VERIFIER_FEE}\"").into_bytes()), id, &mut c);
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    let call = format!("{:?}", receipts.iter().find(|r| r.receiver_id == acc("outlayer.testnet")).unwrap());
+    let bytes = |s: &str| format!("{:?}", s.as_bytes()).trim_matches(['[', ']']).to_string();
+    assert!(call.contains(&bytes(VERIFIER_VERSION)), "pinned hash");
+    assert!(call.contains(&bytes("attached_usd")));
+}
+
+fn verifier_output(status: &str, head: &str, verdict: &str) -> Vec<u8> {
+    json!({ "status": status, "head_sha": head, "verdict": verdict }).to_string().into_bytes()
+}
+
+#[test]
+fn verifier_verdict_counts_only_if_verified_and_bound_to_the_commit() {
+    assert_eq!(rules::read_verifier(&verifier_output("verified", SHA_B, "meets"), SHA_B).as_deref(), Some("meets"));
+    assert_eq!(rules::read_verifier(&verifier_output("verified", SHA_A, "meets"), SHA_B), None, "other commit");
+    assert_eq!(rules::read_verifier(&verifier_output("too_large", SHA_B, "meets"), SHA_B), None);
+    assert_eq!(rules::read_verifier(&verifier_output("verified", SHA_B, "approved"), SHA_B), None);
+    assert_eq!(rules::read_verifier(br#"{"error":"signature_text_mismatch"}"#, SHA_B), None);
+    assert_eq!(rules::read_verifier(b"null", SHA_B), None);
+}
+
+#[test]
+fn verifier_result_moves_no_money() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    set_callback(PromiseResult::Successful(verifier_output("verified", SHA_B, "meets")));
+    c.on_verified(id, SHA_B.to_string(), acc("funder.testnet"), MIN_VERIFIER_DEPOSIT);
+    assert_eq!(c.get_milestone(id).unwrap().status, Status::Funded);
+    assert!(near_sdk::test_utils::get_created_receipts().is_empty());
+    assert!(get_logs().iter().any(|l| l.contains("verdict=meets")));
+}
+
 // Time parsing
 
 #[test]

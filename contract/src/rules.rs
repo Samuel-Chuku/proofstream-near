@@ -3,6 +3,7 @@
 use near_sdk::serde::Deserialize;
 
 const SHA256_HEX_LEN: usize = 64;
+const GIT_SHA_LEN: usize = 40;
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every field is required, so an `{"error": ...}` output fails to parse and refuses.
@@ -18,6 +19,26 @@ pub struct CheckerOutput {
     pub base_branch: String,
     pub checks_conclusion: String,
     pub touches_github: bool,
+}
+
+/// Output of the verifier. `status` must be `verified`, so errors and `too_large` give no verdict.
+#[derive(Deserialize, Debug)]
+#[serde(crate = "near_sdk::serde")]
+struct VerifierOutput {
+    status: String,
+    head_sha: String,
+    verdict: String,
+}
+
+/// The verdict, only if the signature was verified and it binds to this commit.
+pub fn read_verifier(bytes: &[u8], head_sha: &str) -> Option<String> {
+    let output: VerifierOutput = near_sdk::serde_json::from_slice(bytes).ok()?;
+    let known = matches!(output.verdict.as_str(), "meets" | "does_not_meet" | "unclear");
+    (output.status == "verified" && output.head_sha == head_sha && known).then_some(output.verdict)
+}
+
+pub fn is_git_sha(s: &str) -> bool {
+    s.len() == GIT_SHA_LEN && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

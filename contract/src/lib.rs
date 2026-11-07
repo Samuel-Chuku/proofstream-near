@@ -28,6 +28,22 @@ const MAX_EXECUTION_SECONDS: u64 = 60;
 /// The checker's output is measured at under 500 bytes. A larger result refuses.
 const MAX_CHECKER_OUTPUT_BYTES: usize = 4096;
 
+/// The verifier is pinned in code here because adding it to `new` would change stored state.
+const VERIFIER_PROJECT: &str = "proofstream-verifier-owner.testnet/proofstream-verifier";
+const VERIFIER_VERSION: &str = "9c6eebed7b7f99e68bf239b61083c8c652a630befc97a4eb05cb046ca1efea52";
+const VERIFIER_SECRETS_OWNER: &str = "proofstream-verifier-owner.testnet";
+const VERIFIER_SECRETS_PROFILE: &str = "default";
+/// In the token's minimal units: 0.05 test USDC.
+const VERIFIER_FEE: u128 = 50_000;
+const MIN_VERIFIER_DEPOSIT: NearToken = NearToken::from_millinear(30);
+const VERIFIER_MAX_EXECUTION_SECONDS: u64 = 85;
+const VERIFIER_MAX_INSTRUCTIONS: u64 = 100_000_000_000;
+const VERIFIER_MAX_MEMORY_MB: u32 = 256;
+const FT_TRANSFER_CALL_GAS: Gas = Gas::from_tgas(60);
+const ON_FEE_DEPOSITED_GAS: Gas = Gas::from_tgas(150);
+const ON_VERIFIED_GAS: Gas = Gas::from_tgas(20);
+const MAX_FEE_RESULT_BYTES: usize = 64;
+
 const DEFAULT_MAX_PAID_ATTEMPTS: u32 = 3;
 const MAX_PAID_ATTEMPTS_LIMIT: u32 = 10;
 const MAX_TEXT_BYTES: usize = 2000;
@@ -330,6 +346,114 @@ impl Contract {
             env::log_str(&format!("payout_failed id={milestone_id} pr={pr_number}"));
         }
         self.milestones.insert(milestone_id, m);
+    }
+
+    /// Q6: pays the verifier's owner from this milestone's fee, then records its verdict.
+    /// Only the milestone's funder can spend its fee. The build calls this from the AI stage,
+    /// after the hard facts pass. A verdict is only logged here: it moves no money.
+    #[payable]
+    pub fn pay_verifier(&mut self, milestone_id: u64, base_sha: String, head_sha: String) -> Promise {
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_VERIFIER_DEPOSIT, "attach at least 0.03 NEAR");
+        require!(rules::is_git_sha(&base_sha) && rules::is_git_sha(&head_sha), "bad sha");
+        let caller = env::predecessor_account_id();
+
+        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        require!(caller == m.funder, "only the funder can spend the fee");
+        require!(m.fee_remaining.0 >= VERIFIER_FEE, "fee exhausted");
+        m.fee_remaining = U128(m.fee_remaining.0 - VERIFIER_FEE);
+        self.milestones.insert(milestone_id, m);
+        env::log_str(&format!("verifier_fee_spent id={milestone_id} amount={VERIFIER_FEE}"));
+
+        Promise::new(self.token.clone())
+            .function_call(
+                "ft_transfer_call".to_string(),
+                json!({
+                    "receiver_id": self.outlayer,
+                    "amount": U128(VERIFIER_FEE),
+                    "msg": json!({ "action": "deposit_balance" }).to_string(),
+                })
+                .to_string()
+                .into_bytes(),
+                ONE_YOCTO,
+                FT_TRANSFER_CALL_GAS,
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_FEE_DEPOSITED_GAS)
+                    .with_unused_gas_weight(1)
+                    .on_fee_deposited(milestone_id, base_sha, head_sha, caller, deposit),
+            )
+    }
+
+    #[private]
+    pub fn on_fee_deposited(
+        &mut self,
+        milestone_id: u64,
+        base_sha: String,
+        head_sha: String,
+        caller: AccountId,
+        deposit: NearToken,
+    ) {
+        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        let deposited = env::promise_result_checked(0, MAX_FEE_RESULT_BYTES)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<U128>(&bytes).ok())
+            .is_some_and(|used| used.0 == VERIFIER_FEE);
+        if !deposited {
+            m.fee_remaining = U128(m.fee_remaining.0 + VERIFIER_FEE);
+            self.milestones.insert(milestone_id, m);
+            let _ = Promise::new(caller).transfer(deposit);
+            env::log_str(&format!("verifier_fee_restored id={milestone_id}"));
+            return;
+        }
+
+        let input = json!({
+            "owner": m.repo_owner,
+            "repo": m.repo,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "milestone_text": m.milestone_text,
+        });
+        let args = json!({
+            "source": { "Project": { "project_id": VERIFIER_PROJECT, "version_key": VERIFIER_VERSION }},
+            "resource_limits": {
+                "max_instructions": VERIFIER_MAX_INSTRUCTIONS,
+                "max_memory_mb": VERIFIER_MAX_MEMORY_MB,
+                "max_execution_seconds": VERIFIER_MAX_EXECUTION_SECONDS,
+            },
+            "input_data": input.to_string(),
+            "secrets_ref": { "profile": VERIFIER_SECRETS_PROFILE, "account_id": VERIFIER_SECRETS_OWNER },
+            "response_format": "Json",
+            "payer_account_id": caller,
+            "params": { "attached_usd": U128(VERIFIER_FEE) },
+        });
+        let _ = Promise::new(self.outlayer.clone())
+            .function_call_weight(
+                "request_execution".to_string(),
+                args.to_string().into_bytes(),
+                deposit,
+                REQUEST_MIN_GAS,
+                GasWeight(1),
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_VERIFIED_GAS)
+                    .on_verified(milestone_id, head_sha, caller, deposit),
+            );
+    }
+
+    #[private]
+    pub fn on_verified(&mut self, milestone_id: u64, head_sha: String, caller: AccountId, deposit: NearToken) {
+        let result = env::promise_result_checked(0, MAX_CHECKER_OUTPUT_BYTES);
+        // As in `on_checked`: an admission failure returns the deposit to this contract.
+        if matches!(result, Err(PromiseError::Failed)) {
+            let _ = Promise::new(caller).transfer(deposit);
+        }
+        match result.ok().and_then(|bytes| rules::read_verifier(&bytes, &head_sha)) {
+            Some(verdict) => env::log_str(&format!("verifier_verdict id={milestone_id} head={head_sha} verdict={verdict}")),
+            None => env::log_str(&format!("verifier_unverified id={milestone_id} head={head_sha}")),
+        }
     }
 
     pub fn get_milestone(&self, milestone_id: u64) -> Option<Milestone> {
