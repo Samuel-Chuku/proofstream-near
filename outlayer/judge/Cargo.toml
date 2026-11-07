@@ -1,0 +1,29 @@
+[package]
+name = "proofstream-judge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "proofstream-judge"
+path = "src/main.rs"
+
+[features]
+# Test builds only: alters the response before verifying it. Never in a pinned build.
+tamper-test = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "=0.11.1", default-features = false }
+sha3 = { version = "=0.12.0", default-features = false }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasi-http-client = "0.2.1"
+wasi = "=0.13.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
