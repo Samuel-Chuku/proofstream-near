@@ -28,6 +28,7 @@ struct Pull {
     merged: bool,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
+    merged_by: Option<User>,
     user: User,
     head: Head,
     base: Base,
@@ -53,6 +54,7 @@ struct Base {
 
 #[derive(Deserialize)]
 struct Repo {
+    id: u64,
     private: bool,
 }
 
@@ -97,12 +99,14 @@ enum CiSource {
 struct Output {
     owner: String,
     repo: String,
+    repo_id: u64,
     pr_number: u64,
     merged: bool,
     merge_commit_sha: Option<String>,
     head_sha: String,
     author_login: String,
     author_id: u64,
+    merged_by_id: Option<u64>,
     base_branch: String,
     checks_conclusion: Checks,
     ci_source: CiSource,
@@ -268,12 +272,14 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
     serde_json::to_value(Output {
         owner: input.owner,
         repo: input.repo,
+        repo_id: pull.base.repo.id,
         pr_number: input.pr_number,
         merged: pull.merged,
         merge_commit_sha: pull.merge_commit_sha.filter(|_| pull.merged),
         head_sha: pull.head.sha,
         author_login: pull.user.login,
         author_id: pull.user.id,
+        merged_by_id: pull.merged_by.map(|u| u.id),
         base_branch: pull.base.name,
         checks_conclusion,
         ci_source,
