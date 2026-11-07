@@ -587,6 +587,198 @@ fn verifier_result_moves_no_money() {
     assert!(get_logs().iter().any(|l| l.contains("verdict=meets")));
 }
 
+// Binding the payout account (Q3)
+
+const CONTRACT: &str = "contract.testnet";
+const IMPLICIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn unbound(c: &mut Contract) -> u64 {
+    let mut m: serde_json::Value = serde_json::from_str(&msg(BUDGET, FEE)).unwrap();
+    m["payee_account"] = json!(CONTRACT);
+    set("token.testnet", NearToken::from_near(0));
+    c.ft_on_transfer(acc("funder.testnet"), U128(BUDGET + FEE), m.to_string());
+    c.next_id - 1
+}
+
+const BIND_DEPOSIT: NearToken = NearToken::from_millinear(25);
+
+fn start_bind(c: &mut Contract, id: u64) {
+    set("relayer.testnet", BIND_DEPOSIT);
+    let _ = c.bind_payee(id, "abc123".to_string());
+}
+
+fn binder_output(c: &Contract, id: u64, account: &str) -> serde_json::Value {
+    json!({ "gist_id": "abc123", "gist_version": "v1", "owner_id": PAYEE_ID, "contract": CONTRACT,
+            "milestone_id": id, "nonce": c.get_bind_nonce(id).unwrap(), "account": account })
+}
+
+fn deliver_bind(c: &mut Contract, id: u64, result: PromiseResult) {
+    set_callback(result);
+    c.on_bind_checked(id, acc("relayer.testnet"), NearToken::from_micronear(13_750), NearToken::from_micronear(11_250));
+}
+
+fn deliver_bind_json(c: &mut Contract, id: u64, v: serde_json::Value) {
+    deliver_bind(c, id, PromiseResult::Successful(v.to_string().into_bytes()));
+}
+
+fn bind_refused_with(change: impl FnOnce(&mut serde_json::Value), reason: &str) {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    let mut v = binder_output(&c, id, "me.testnet");
+    change(&mut v);
+    deliver_bind_json(&mut c, id, v);
+    assert_eq!(c.get_bound_payee(id), None, "nothing may be bound");
+    assert!(get_logs().iter().any(|l| l.contains(reason)), "expected {reason} in {:?}", get_logs());
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    assert!(receipts.iter().any(|r| r.receiver_id == acc("relayer.testnet")), "reserve goes back to the caller");
+    assert!(!receipts.iter().any(|r| r.receiver_id == acc("token.testnet")), "no registration");
+}
+
+#[test]
+fn gist_owner_must_hold_the_github_id() {
+    bind_refused_with(|v| v["owner_id"] = json!(1), "NotTheGithubIdHolder");
+}
+
+#[test]
+fn gist_for_another_contract_is_refused() {
+    bind_refused_with(|v| v["contract"] = json!("other.testnet"), "WrongContract");
+}
+
+#[test]
+fn gist_for_another_milestone_is_refused() {
+    bind_refused_with(|v| v["milestone_id"] = json!(99), "WrongMilestone");
+}
+
+#[test]
+fn stale_nonce_is_refused() {
+    bind_refused_with(|v| v["nonce"] = json!("old"), "WrongNonce");
+}
+
+#[test]
+fn invalid_account_name_is_refused() {
+    bind_refused_with(|v| v["account"] = json!("NOT VALID!"), "UnreadableOutput");
+}
+
+#[test]
+fn binder_error_binds_nothing() {
+    bind_refused_with(|v| *v = json!({ "error": "gist_not_found" }), "UnreadableOutput");
+}
+
+#[test]
+fn paying_the_contract_itself_is_refused() {
+    bind_refused_with(|v| v["account"] = json!(CONTRACT), "UnreadableOutput");
+}
+
+#[test]
+fn nonce_differs_per_milestone() {
+    let mut c = new_contract();
+    let (a, b) = (unbound(&mut c), unbound(&mut c));
+    assert_ne!(c.get_bind_nonce(a), c.get_bind_nonce(b));
+}
+
+#[test]
+fn valid_gist_binds_the_account_and_registers_it() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    let v = binder_output(&c, id, "me.testnet");
+    deliver_bind_json(&mut c, id, v);
+    assert_eq!(c.get_bound_payee(id), Some(acc("me.testnet")));
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    assert!(receipts.iter().any(|r| r.receiver_id == acc("token.testnet")), "token registration");
+    assert!(!receipts.iter().any(|r| r.receiver_id == acc("me.testnet")), "a named account isn't created");
+    assert!(receipts.iter().any(|r| r.receiver_id == acc("relayer.testnet")), "unused NEAR returns");
+}
+
+#[test]
+fn new_implicit_account_is_created_with_a_transfer() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    let v = binder_output(&c, id, IMPLICIT);
+    deliver_bind_json(&mut c, id, v);
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    assert!(receipts.iter().any(|r| r.receiver_id == acc(IMPLICIT)));
+}
+
+#[test]
+fn second_binding_in_flight_cannot_replace_the_first() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    start_bind(&mut c, id);
+    let v = binder_output(&c, id, "first.testnet");
+    deliver_bind_json(&mut c, id, v);
+    let w = binder_output(&c, id, "second.testnet");
+    deliver_bind_json(&mut c, id, w);
+    assert_eq!(c.get_bound_payee(id), Some(acc("first.testnet")));
+    assert!(get_logs().iter().any(|l| l.contains("AlreadyBound")));
+}
+
+#[test]
+#[should_panic(expected = "already bound")]
+fn binding_is_final() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    let v = binder_output(&c, id, "me.testnet");
+    deliver_bind_json(&mut c, id, v);
+    start_bind(&mut c, id);
+}
+
+#[test]
+#[should_panic(expected = "this milestone has a fixed payee")]
+fn funder_set_payee_cannot_be_rebound() {
+    let mut c = new_contract();
+    let id = funded(&mut c);
+    start_bind(&mut c, id);
+}
+
+#[test]
+#[should_panic(expected = "attach at least 0.025 NEAR")]
+fn binding_needs_a_deposit() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    set("relayer.testnet", MIN_CLAIM_DEPOSIT);
+    let _ = c.bind_payee(id, "abc123".to_string());
+}
+
+#[test]
+#[should_panic(expected = "payee is not bound yet")]
+fn unbound_milestone_cannot_be_claimed() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    claim(&mut c, id, PR);
+}
+
+#[test]
+fn admission_failure_returns_compute_and_reserve() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    deliver_bind(&mut c, id, PromiseResult::Failed);
+    assert_eq!(c.get_bound_payee(id), None);
+    assert!(get_logs().iter().any(|l| l.contains("CheckerFailed")));
+    let receipts = format!("{:?}", near_sdk::test_utils::get_created_receipts());
+    assert!(receipts.contains(&BIND_DEPOSIT.as_yoctonear().to_string()), "{receipts}");
+}
+
+#[test]
+fn bound_milestone_pays_the_bound_account_only() {
+    let mut c = new_contract();
+    let id = unbound(&mut c);
+    start_bind(&mut c, id);
+    let v = binder_output(&c, id, "me.testnet");
+    deliver_bind_json(&mut c, id, v);
+    claim(&mut c, id, PR);
+    deliver_json(&mut c, id, PR, good_output());
+    assert_eq!(c.get_milestone(id).unwrap().status, Status::Paying);
+    let transfer = format!("{:?}", near_sdk::test_utils::get_created_receipts());
+    let bytes = format!("{:?}", "me.testnet".as_bytes()).trim_matches(['[', ']']).to_string();
+    assert!(transfer.contains(&bytes), "{transfer}");
+}
+
 // Time parsing
 
 #[test]

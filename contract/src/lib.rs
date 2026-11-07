@@ -44,6 +44,23 @@ const ON_FEE_DEPOSITED_GAS: Gas = Gas::from_tgas(150);
 const ON_VERIFIED_GAS: Gas = Gas::from_tgas(20);
 const MAX_FEE_RESULT_BYTES: usize = 64;
 
+/// Q3. Pinned in code for the same reason as the verifier.
+const BINDER_PROJECT: &str = "proofstream-checker-owner.testnet/proofstream-binder";
+const BINDER_VERSION: &str = "7b9921be0a5a02ed78c03dc4b372607d37d94f4472e292327d8319c02ce39750";
+const BINDER_SECRETS_OWNER: &str = "proofstream-checker-owner.testnet";
+const BINDER_SECRETS_PROFILE: &str = "default";
+const BINDER_MAX_EXECUTION_SECONDS: u64 = 30;
+/// Token storage for the payout account, as `storage_balance_bounds` reports for this token.
+const TOKEN_STORAGE: NearToken = NearToken::from_micronear(1_250);
+/// Sent to a new 64-hex account, which creates it and pays its first transactions.
+const NEW_ACCOUNT_NEAR: NearToken = NearToken::from_millinear(10);
+const MIN_BIND_COMPUTE: NearToken = NearToken::from_millinear(10);
+const ON_BIND_CHECKED_GAS: Gas = Gas::from_tgas(60);
+const STORAGE_DEPOSIT_GAS: Gas = Gas::from_tgas(10);
+const MAX_GIST_ID_BYTES: usize = 64;
+const BOUND_KEY_PREFIX: &str = "b:";
+const NONCE_HASH_BYTES: usize = 16;
+
 const DEFAULT_MAX_PAID_ATTEMPTS: u32 = 3;
 const MAX_PAID_ATTEMPTS_LIMIT: u32 = 10;
 const MAX_TEXT_BYTES: usize = 2000;
@@ -126,6 +143,7 @@ pub struct Config {
 #[allow(dead_code)]
 trait FungibleToken {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+    fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>);
 }
 
 #[near(contract_state)]
@@ -144,6 +162,31 @@ pub struct Contract {
 
 fn pr_key(repo_id: u64, pr_number: u64) -> String {
     format!("{repo_id}:{pr_number}")
+}
+
+/// A raw key rather than a struct field, so existing stored state still reads. Spike only.
+fn bound_key(milestone_id: u64) -> Vec<u8> {
+    format!("{BOUND_KEY_PREFIX}{milestone_id}").into_bytes()
+}
+
+fn read_bound(milestone_id: u64) -> Option<AccountId> {
+    let bytes = env::storage_read(&bound_key(milestone_id))?;
+    String::from_utf8(bytes).ok()?.parse().ok()
+}
+
+/// Who a milestone pays. `payee_account` set to this contract means "not chosen yet":
+/// only the proven holder of the GitHub id can choose, through `bind_payee`.
+fn payout_account(milestone_id: u64, m: &Milestone) -> Option<AccountId> {
+    if m.payee_account == env::current_account_id() {
+        read_bound(milestone_id)
+    } else {
+        Some(m.payee_account.clone())
+    }
+}
+
+fn bind_nonce(milestone_id: u64, created_at_ns: u64) -> String {
+    let seed = format!("{}:{milestone_id}:{created_at_ns}", env::current_account_id());
+    env::sha256(seed.as_bytes())[..NONCE_HASH_BYTES].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[near]
@@ -231,6 +274,7 @@ impl Contract {
 
         let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
         require!(m.status == Status::Funded, "milestone is not claimable");
+        require!(payout_account(milestone_id, &m).is_some(), "payee is not bound yet");
         let key = pr_key(m.repo_id, pr_number);
         require!(!self.pr_locks.contains_key(&key), "PR is locked or already paid");
 
@@ -308,6 +352,8 @@ impl Contract {
             },
         };
 
+        let payee = payout_account(milestone_id, &m);
+        let verdict = verdict.and_then(|()| if payee.is_some() { Ok(()) } else { Err(Refusal::PayeeNotBound) });
         if let Err(refusal) = verdict {
             m.status = Status::Funded;
             m.active_pr = None;
@@ -318,7 +364,9 @@ impl Contract {
         }
 
         m.status = Status::Paying;
-        let (payee, budget) = (m.payee_account.clone(), m.budget);
+        let budget = m.budget;
+        // Checked just above: a missing payee refuses.
+        let payee = payee.unwrap_or_else(|| env::panic_str("no payee"));
         self.milestones.insert(milestone_id, m);
         env::log_str(&format!("payout_started id={milestone_id} pr={pr_number}"));
         let _ = ext_ft::ext(self.token.clone())
@@ -453,6 +501,111 @@ impl Contract {
         match result.ok().and_then(|bytes| rules::read_verifier(&bytes, &head_sha)) {
             Some(verdict) => env::log_str(&format!("verifier_verdict id={milestone_id} head={head_sha} verdict={verdict}")),
             None => env::log_str(&format!("verifier_unverified id={milestone_id} head={head_sha}")),
+        }
+    }
+
+    /// Q3: the nonce a binding gist must carry for this milestone.
+    pub fn get_bind_nonce(&self, milestone_id: u64) -> Option<String> {
+        self.milestones.get(&milestone_id).map(|m| bind_nonce(milestone_id, m.created_at_ns))
+    }
+
+    pub fn get_bound_payee(&self, milestone_id: u64) -> Option<AccountId> {
+        read_bound(milestone_id)
+    }
+
+    /// Q3: anyone can submit, because the gist proves the choice, not the caller. The caller
+    /// pays the NEAR. Who that is for a contributor with no wallet is a build decision (D14).
+    #[payable]
+    pub fn bind_payee(&mut self, milestone_id: u64, gist_id: String) -> Promise {
+        let reserve = TOKEN_STORAGE.saturating_add(NEW_ACCOUNT_NEAR);
+        let deposit = env::attached_deposit();
+        require!(deposit >= reserve.saturating_add(MIN_BIND_COMPUTE), "attach at least 0.025 NEAR");
+        require!(!gist_id.is_empty() && gist_id.len() <= MAX_GIST_ID_BYTES, "bad gist id");
+        let m = self.milestones.get(&milestone_id).unwrap_or_else(|| env::panic_str("no such milestone"));
+        require!(m.status == Status::Funded, "milestone is not bindable");
+        require!(m.payee_account == env::current_account_id(), "this milestone has a fixed payee");
+        require!(read_bound(milestone_id).is_none(), "already bound");
+
+        let caller = env::predecessor_account_id();
+        let compute = deposit.saturating_sub(reserve);
+        let input = json!({
+            "gist_id": gist_id,
+            "contract": env::current_account_id(),
+            "milestone_id": milestone_id,
+            "nonce": bind_nonce(milestone_id, m.created_at_ns),
+        });
+        let args = json!({
+            "source": { "Project": { "project_id": BINDER_PROJECT, "version_key": BINDER_VERSION }},
+            "resource_limits": {
+                "max_instructions": MAX_INSTRUCTIONS,
+                "max_memory_mb": MAX_MEMORY_MB,
+                "max_execution_seconds": BINDER_MAX_EXECUTION_SECONDS,
+            },
+            "input_data": input.to_string(),
+            "secrets_ref": { "profile": BINDER_SECRETS_PROFILE, "account_id": BINDER_SECRETS_OWNER },
+            "response_format": "Json",
+            "payer_account_id": caller,
+        });
+        Promise::new(self.outlayer.clone())
+            .function_call_weight(
+                "request_execution".to_string(),
+                args.to_string().into_bytes(),
+                compute,
+                REQUEST_MIN_GAS,
+                GasWeight(1),
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_BIND_CHECKED_GAS)
+                    .on_bind_checked(milestone_id, caller, compute, reserve),
+            )
+    }
+
+    #[private]
+    pub fn on_bind_checked(&mut self, milestone_id: u64, caller: AccountId, compute: NearToken, reserve: NearToken) {
+        let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        let result = env::promise_result_checked(0, MAX_CHECKER_OUTPUT_BYTES);
+        let admission_failed = matches!(result, Err(PromiseError::Failed));
+        let outcome = match result {
+            Err(_) => Err(Refusal::CheckerFailed),
+            Ok(bytes) => rules::evaluate_binding(
+                &bytes,
+                env::current_account_id().as_str(),
+                milestone_id,
+                &bind_nonce(milestone_id, m.created_at_ns),
+                m.payee_github_id,
+            ),
+        };
+        let outcome = outcome.and_then(|account| {
+            if read_bound(milestone_id).is_some() {
+                Err(Refusal::AlreadyBound)
+            } else if m.status != Status::Funded {
+                Err(Refusal::NotFunded)
+            } else {
+                Ok(account)
+            }
+        });
+        match outcome {
+            Err(refusal) => {
+                let back = if admission_failed { reserve.saturating_add(compute) } else { reserve };
+                let _ = Promise::new(caller).transfer(back);
+                env::log_str(&format!("bind_refused id={milestone_id} reason={refusal:?}"));
+            }
+            Ok(account) => {
+                env::storage_write(&bound_key(milestone_id), account.as_bytes());
+                env::log_str(&format!("payee_bound id={milestone_id} account={account}"));
+                let _ = ext_ft::ext(self.token.clone())
+                    .with_attached_deposit(TOKEN_STORAGE)
+                    .with_static_gas(STORAGE_DEPOSIT_GAS)
+                    .storage_deposit(Some(account.clone()), Some(true));
+                // Only a 64-hex account can be created by a transfer. A named one must already exist.
+                let (to, amount) = if rules::is_implicit_account(account.as_str()) {
+                    (account, NEW_ACCOUNT_NEAR)
+                } else {
+                    (caller, NEW_ACCOUNT_NEAR)
+                };
+                let _ = Promise::new(to).transfer(amount);
+            }
         }
     }
 

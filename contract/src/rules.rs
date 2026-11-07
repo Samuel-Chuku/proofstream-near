@@ -1,9 +1,11 @@
 //! What the checker's output must say before money moves. No state, no I/O.
 
 use near_sdk::serde::Deserialize;
+use near_sdk::AccountId;
 
 const SHA256_HEX_LEN: usize = 64;
 const GIT_SHA_LEN: usize = 40;
+const IMPLICIT_ACCOUNT_LEN: usize = 64;
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every field is required, so an `{"error": ...}` output fails to parse and refuses.
@@ -55,6 +57,57 @@ pub enum Refusal {
     ChecksNotSuccessful,
     TouchesGithub,
     MergedBeforeMilestone,
+    PayeeNotBound,
+    NotTheGithubIdHolder,
+    WrongContract,
+    WrongMilestone,
+    WrongNonce,
+    AlreadyBound,
+    NotFunded,
+}
+
+/// Output of the binder. An `{"error": ...}` output fails to parse and refuses.
+#[derive(Deserialize, Debug)]
+#[serde(crate = "near_sdk::serde")]
+struct BinderOutput {
+    owner_id: u64,
+    contract: String,
+    milestone_id: u64,
+    nonce: String,
+    account: AccountId,
+}
+
+/// The account a gist chose, only if its owner holds this milestone's GitHub id
+/// and it answers this contract's nonce for this milestone.
+pub fn evaluate_binding(
+    bytes: &[u8],
+    contract: &str,
+    milestone_id: u64,
+    nonce: &str,
+    payee_github_id: u64,
+) -> Result<AccountId, Refusal> {
+    let output: BinderOutput = near_sdk::serde_json::from_slice(bytes).map_err(|_| Refusal::UnreadableOutput)?;
+    if output.owner_id != payee_github_id {
+        return Err(Refusal::NotTheGithubIdHolder);
+    }
+    if output.contract != contract {
+        return Err(Refusal::WrongContract);
+    }
+    if output.milestone_id != milestone_id {
+        return Err(Refusal::WrongMilestone);
+    }
+    if output.nonce != nonce {
+        return Err(Refusal::WrongNonce);
+    }
+    // Paying this contract would strand the money.
+    if output.account.as_str() == contract {
+        return Err(Refusal::UnreadableOutput);
+    }
+    Ok(output.account)
+}
+
+pub fn is_implicit_account(account: &str) -> bool {
+    account.len() == IMPLICIT_ACCOUNT_LEN && account.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 pub fn evaluate(
