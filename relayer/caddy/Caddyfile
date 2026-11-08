@@ -1,0 +1,35 @@
+# TLS for RELAYER_DOMAIN on 443 only. The certificate comes from Let's Encrypt
+# through the TLS-ALPN-01 challenge, so neither port 80 nor a DNS token is needed.
+# The domain's DNS record must be "DNS only" in Cloudflare (D41).
+{
+	admin off
+	auto_https disable_redirects
+}
+
+{$RELAYER_DOMAIN} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+
+	request_body {
+		max_size 1KB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	@api path /bind_payee /claim /review /health
+	handle @api {
+		reverse_proxy relayer:8080 {
+			# Overwrites anything the client sent; the relayer rate-limits on this.
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

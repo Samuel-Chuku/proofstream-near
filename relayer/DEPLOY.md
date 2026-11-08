@@ -5,7 +5,7 @@ The relayer submits only `bind_payee`, `claim` and `review` to `proofstream-v1.t
 ## What runs
 
 - `relayer`: Node 22 with no npm packages, from `Dockerfile`. It runs as the non-root `node` user, with a read-only filesystem, no Linux capabilities, `no-new-privileges` and 256 MB of memory. It's reachable only from the proxy.
-- `proxy`: Nginx. It terminates TLS on 443 for `RELAYER_DOMAIN`, forwards only `/bind_payee`, `/claim`, `/review` and `/health`, caps bodies at 1 KiB and limits each IP to 30 requests a minute.
+- `proxy`: Caddy. It terminates TLS on 443 for `RELAYER_DOMAIN`, forwards only `/bind_payee`, `/claim`, `/review` and `/health`, and caps bodies at 1 KiB. It gets and renews its own Let's Encrypt certificate over 443 (TLS-ALPN-01), so port 80 stays closed and no DNS token is needed.
 - **Limits in the relayer** (in memory, reset on restart):
   - 10 requests per IP per hour
   - 6 sends per milestone per hour
@@ -15,10 +15,10 @@ The relayer submits only `bind_payee`, `claim` and `review` to `proofstream-v1.t
 
 ## Host (AWS)
 
-1. **Security group:** inbound TCP 443 from anywhere, and TCP 22 from your IP only. Nothing else. Port 80 depends on D41.
+1. **Security group:** inbound TCP 443 from anywhere, and TCP 22 from your IP only. Nothing else.
 2. **SSH:** key only. In `/etc/ssh/sshd_config`, set `PasswordAuthentication no` and `PermitRootLogin no`, then `sudo systemctl reload ssh`.
 3. **Docker:** install Docker Engine and the Compose plugin from Docker's apt repository (docs.docker.com/engine/install/ubuntu).
-4. **Certificate:** put it at `/etc/letsencrypt/live/$RELAYER_DOMAIN/{fullchain,privkey}.pem`. How it's issued is D41.
+4. **DNS:** in Cloudflare, an `A` record for `RELAYER_DOMAIN` pointing to the VPS's public IP, set to **DNS only** (grey cloud). With the orange cloud, Cloudflare answers the certificate challenge instead of Caddy and issuance fails. Caddy fetches the certificate on first start; nothing to install.
 
 ## Key (never in env, never in git)
 
@@ -36,7 +36,7 @@ Then on the VPS:
 cd proofstream-near/relayer
 # Compose mounts file secrets with their host owner and mode; uid 1000 is the container's `node` user.
 sudo chown 1000:1000 secrets/relayer_key.json && sudo chmod 600 secrets/relayer_key.json
-cp .env.example .env   # fill in ALLOWED_ORIGIN and RELAYER_DOMAIN
+cp .env.example .env   # fill in ALLOWED_ORIGIN (the front end's Cloudflare Pages origin) and RELAYER_DOMAIN
 ```
 
 ## Run
@@ -44,6 +44,7 @@ cp .env.example .env   # fill in ALLOWED_ORIGIN and RELAYER_DOMAIN
 ```bash
 docker compose up -d --build
 docker compose logs relayer        # expect one "listening" line
+docker compose logs proxy          # expect "certificate obtained successfully"
 curl https://$RELAYER_DOMAIN/health
 ```
 
