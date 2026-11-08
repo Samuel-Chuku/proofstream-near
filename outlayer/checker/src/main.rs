@@ -1,6 +1,6 @@
 //! Reads `{owner, repo, pr_number, required_checks}` on stdin and prints the PR's
-//! hard facts as compact JSON. Any failure prints `{"error": ...}`, so the contract
-//! refuses by default. Response bodies are never echoed.
+//! hard facts as compact JSON (fields in `rules::Output`). Any failure prints
+//! `{"error": ...}`, so the contract refuses by default. Response bodies are never echoed.
 
 mod rules;
 

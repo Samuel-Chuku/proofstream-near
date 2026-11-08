@@ -1,12 +1,99 @@
 //! The checker's decisions, kept free of I/O so each rule has a test.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const GITHUB_DIR: &str = ".github/";
 /// The `app.slug` GitHub reports on check runs created by GitHub Actions.
 pub const ACTIONS_APP_SLUG: &str = "github-actions";
 const MAX_OWNER_LEN: usize = 39;
 const MAX_REPO_LEN: usize = 100;
+/// GitHub's PR files API returns at most this many files.
+pub const MAX_PR_FILES: u64 = 3000;
+/// GitHub's account `type` for a person. Bots and organizations never count as review.
+const HUMAN: &str = "User";
+
+/// A GitHub account as it appears on a PR or review.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct Account {
+    pub id: u64,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Review {
+    /// Null when the reviewer's account was deleted.
+    pub user: Option<Account>,
+    pub state: String,
+    pub commit_id: Option<String>,
+}
+
+/// D30: a human other than the author approved this exact head commit, and hasn't
+/// since withdrawn it. Only each reviewer's latest decisive review counts, so a later
+/// "changes requested" or a dismissal cancels an approval; plain comments don't.
+pub fn independent_approval(reviews: &[Review], author_id: u64, head_sha: &str) -> bool {
+    let mut latest: HashMap<u64, &Review> = HashMap::new();
+    for review in reviews {
+        let Some(user) = review.user.as_ref() else { continue };
+        if user.kind != HUMAN || user.id == author_id {
+            continue;
+        }
+        if matches!(review.state.as_str(), "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+            latest.insert(user.id, review);
+        }
+    }
+    latest
+        .values()
+        .any(|r| r.state == "APPROVED" && r.commit_id.as_deref() == Some(head_sha))
+}
+
+/// D31: the listed files are the whole PR only if their count equals GitHub's own
+/// `changed_files`, and the PR is within what the files API can list.
+pub fn file_list_complete(listed: u64, changed_files: u64) -> bool {
+    listed == changed_files && changed_files <= MAX_PR_FILES
+}
+
+/// An unseen file could be under `.github/`, so an incomplete list reports `true`.
+pub fn reported_touches_github(seen_touch: bool, complete: bool) -> bool {
+    seen_touch || !complete
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+// Built only by the WASI GitHub path, which host tests don't compile.
+#[cfg_attr(not(target_os = "wasi"), allow(dead_code))]
+pub enum CiSource {
+    CheckRuns,
+    /// Fine-grained tokens can't read check runs on private repos.
+    /// This path sees GitHub Actions only, never third-party CI.
+    ActionsJobs,
+}
+
+/// What the checker prints. OutLayer returns at most 900 bytes, which a test guards.
+/// Owner and repo aren't echoed: the contract wrote the input and checks `repo_id`.
+#[derive(Serialize)]
+pub struct Output {
+    pub repo_id: u64,
+    pub pr_number: u64,
+    pub merged: bool,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub merge_commit_sha: Option<String>,
+    pub author_login: String,
+    pub author_id: u64,
+    pub merged_by: Option<Account>,
+    pub independent_approval: bool,
+    pub base_branch: String,
+    pub checks_conclusion: Checks,
+    pub ci_source: CiSource,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+    pub files_complete: bool,
+    pub touches_github: bool,
+    pub merged_at: Option<String>,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct App {
@@ -287,6 +374,119 @@ mod tests {
     fn actions_check_is_kept() {
         let kept = only_actions(vec![run("ci", "completed", Some("success"), Some("2026-11-06T11:00:00Z"))]);
         assert_eq!(kept.len(), 1);
+    }
+
+    const AUTHOR: u64 = 1;
+    const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn review(id: u64, kind: &str, state: &str, commit: &str) -> Review {
+        Review {
+            user: Some(Account { id, kind: kind.into() }),
+            state: state.into(),
+            commit_id: Some(commit.into()),
+        }
+    }
+
+    #[test]
+    fn approval_of_head_by_another_human_counts() {
+        assert!(independent_approval(&[review(2, "User", "APPROVED", HEAD)], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn approval_by_the_author_does_not_count() {
+        assert!(!independent_approval(&[review(AUTHOR, "User", "APPROVED", HEAD)], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn approval_by_a_bot_does_not_count() {
+        assert!(!independent_approval(&[review(2, "Bot", "APPROVED", HEAD)], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn approval_of_an_older_commit_does_not_count() {
+        let old = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(!independent_approval(&[review(2, "User", "APPROVED", old)], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn later_changes_requested_withdraws_an_approval() {
+        let reviews = [review(2, "User", "APPROVED", HEAD), review(2, "User", "CHANGES_REQUESTED", HEAD)];
+        assert!(!independent_approval(&reviews, AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn dismissed_approval_does_not_count() {
+        assert!(!independent_approval(&[review(2, "User", "DISMISSED", HEAD)], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn a_later_comment_keeps_an_approval() {
+        let reviews = [review(2, "User", "APPROVED", HEAD), review(2, "User", "COMMENTED", HEAD)];
+        assert!(independent_approval(&reviews, AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn approval_from_a_deleted_account_does_not_count() {
+        let mut r = review(2, "User", "APPROVED", HEAD);
+        r.user = None;
+        assert!(!independent_approval(&[r], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn no_reviews_means_no_approval() {
+        assert!(!independent_approval(&[], AUTHOR, HEAD));
+    }
+
+    #[test]
+    fn matching_file_count_is_complete() {
+        assert!(file_list_complete(250, 250));
+        assert!(file_list_complete(0, 0));
+    }
+
+    #[test]
+    fn fewer_files_listed_than_changed_is_incomplete() {
+        assert!(!file_list_complete(300, 301));
+    }
+
+    #[test]
+    fn more_than_github_can_list_is_incomplete() {
+        assert!(file_list_complete(MAX_PR_FILES, MAX_PR_FILES));
+        assert!(!file_list_complete(MAX_PR_FILES, MAX_PR_FILES + 1));
+    }
+
+    #[test]
+    fn incomplete_list_reports_touching_github() {
+        assert!(reported_touches_github(false, false));
+        assert!(!reported_touches_github(false, true));
+        assert!(reported_touches_github(true, true));
+    }
+
+    #[test]
+    fn largest_output_fits_outlayers_limit() {
+        let sha = "f".repeat(40);
+        let out = Output {
+            repo_id: u64::MAX,
+            pr_number: u64::MAX,
+            merged: true,
+            base_sha: sha.clone(),
+            head_sha: sha.clone(),
+            merge_commit_sha: Some(sha),
+            author_login: "a".repeat(MAX_OWNER_LEN),
+            author_id: u64::MAX,
+            merged_by: Some(Account { id: u64::MAX, kind: "Organization".into() }),
+            independent_approval: false,
+            base_branch: "b".repeat(100),
+            checks_conclusion: Checks::Unavailable,
+            ci_source: CiSource::ActionsJobs,
+            additions: u64::MAX,
+            deletions: u64::MAX,
+            changed_files: u64::MAX,
+            files_complete: false,
+            touches_github: false,
+            merged_at: Some("2026-11-06T12:00:00Z".into()),
+        };
+        let len = serde_json::to_string(&out).unwrap().len();
+        assert!(len <= 900, "output is {len} bytes");
     }
 
     #[test]

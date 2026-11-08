@@ -1,7 +1,7 @@
 //! GitHub REST calls, and the mapping from their results to the checker's output.
 
-use crate::rules::{self, App, ChangedFile, CheckRun, Checks};
-use serde::{Deserialize, Serialize};
+use crate::rules::{self, Account, App, ChangedFile, CheckRun, Checks, CiSource, Output, Review};
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use wasi_http_client::Client;
@@ -14,6 +14,7 @@ const PER_PAGE: usize = 100;
 /// GitHub lists at most 3000 files for a PR.
 const MAX_FILE_PAGES: usize = 30;
 const MAX_CHECK_PAGES: usize = 10;
+const MAX_REVIEW_PAGES: usize = 10;
 
 #[derive(Deserialize)]
 struct Input {
@@ -28,10 +29,13 @@ struct Pull {
     merged: bool,
     merged_at: Option<String>,
     merge_commit_sha: Option<String>,
-    merged_by: Option<User>,
+    merged_by: Option<Account>,
     user: User,
     head: Head,
     base: Base,
+    additions: u64,
+    deletions: u64,
+    changed_files: u64,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +53,7 @@ struct Head {
 struct Base {
     #[serde(rename = "ref")]
     name: String,
+    sha: String,
     repo: Repo,
 }
 
@@ -86,34 +91,6 @@ struct CheckRunsPage {
     check_runs: Vec<CheckRun>,
 }
 
-#[derive(Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum CiSource {
-    CheckRuns,
-    /// Fine-grained tokens can't read check runs on private repos.
-    /// This path sees GitHub Actions only, never third-party CI.
-    ActionsJobs,
-}
-
-#[derive(Serialize)]
-struct Output {
-    owner: String,
-    repo: String,
-    repo_id: u64,
-    pr_number: u64,
-    merged: bool,
-    merge_commit_sha: Option<String>,
-    head_sha: String,
-    author_login: String,
-    author_id: u64,
-    merged_by_id: Option<u64>,
-    base_branch: String,
-    checks_conclusion: Checks,
-    ci_source: CiSource,
-    touches_github: bool,
-    merged_at: Option<String>,
-}
-
 fn get(token: &str, path: &str) -> Result<(u16, Vec<u8>), &'static str> {
     let response = Client::new()
         .get(&format!("{API}{path}"))
@@ -139,20 +116,37 @@ fn get_ok(token: &str, path: &str) -> Result<Vec<u8>, &'static str> {
     }
 }
 
-/// `true` when the list can't be read in full: an unknown file set must not pass.
-fn pr_touches_github(token: &str, base: &str, pr: u64) -> Result<bool, &'static str> {
+/// Reads every page of the PR's files: how many GitHub listed, and whether any
+/// of them is under `.github/`. D31 compares the count with `changed_files`.
+fn pr_files(token: &str, base: &str, pr: u64) -> Result<(u64, bool), &'static str> {
+    let (mut listed, mut touches) = (0u64, false);
     for page in 1..=MAX_FILE_PAGES {
         let path = format!("{base}/pulls/{pr}/files?per_page={PER_PAGE}&page={page}");
         let files: Vec<ChangedFile> =
             serde_json::from_slice(&get_ok(token, &path)?).map_err(|_| "github_bad_json")?;
-        if rules::touches_github(&files) {
-            return Ok(true);
-        }
+        listed += files.len() as u64;
+        touches |= rules::touches_github(&files);
         if files.len() < PER_PAGE {
-            return Ok(false);
+            break;
         }
     }
-    Ok(true)
+    Ok((listed, touches))
+}
+
+/// Every review on the PR, oldest first, as GitHub lists them.
+fn reviews(token: &str, base: &str, pr: u64) -> Result<Vec<Review>, &'static str> {
+    let mut all = Vec::new();
+    for page in 1..=MAX_REVIEW_PAGES {
+        let path = format!("{base}/pulls/{pr}/reviews?per_page={PER_PAGE}&page={page}");
+        let batch: Vec<Review> =
+            serde_json::from_slice(&get_ok(token, &path)?).map_err(|_| "github_bad_json")?;
+        let count = batch.len();
+        all.extend(batch);
+        if count < PER_PAGE {
+            return Ok(all);
+        }
+    }
+    Err("too_many_reviews")
 }
 
 /// `Ok(None)` means GitHub refused this token. The caller reports `unavailable`.
@@ -243,7 +237,10 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
 
     let pull: Pull = serde_json::from_slice(&get_ok(&token, &format!("{base}/pulls/{}", input.pr_number))?)
         .map_err(|_| "github_bad_json")?;
-    let touches_github = pr_touches_github(&token, &base, input.pr_number)?;
+    let (listed, seen_touch) = pr_files(&token, &base, input.pr_number)?;
+    let files_complete = rules::file_list_complete(listed, pull.changed_files);
+    let independent_approval =
+        rules::independent_approval(&reviews(&token, &base, input.pr_number)?, pull.user.id, &pull.head.sha);
     let private = pull.base.repo.private;
     let ci_source = if private { CiSource::ActionsJobs } else { CiSource::CheckRuns };
     let read_ci = |sha: &str| {
@@ -270,20 +267,24 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
     };
 
     serde_json::to_value(Output {
-        owner: input.owner,
-        repo: input.repo,
         repo_id: pull.base.repo.id,
         pr_number: input.pr_number,
         merged: pull.merged,
-        merge_commit_sha: pull.merge_commit_sha.filter(|_| pull.merged),
+        base_sha: pull.base.sha,
         head_sha: pull.head.sha,
+        merge_commit_sha: pull.merge_commit_sha.filter(|_| pull.merged),
         author_login: pull.user.login,
         author_id: pull.user.id,
-        merged_by_id: pull.merged_by.map(|u| u.id),
+        merged_by: pull.merged_by,
+        independent_approval,
         base_branch: pull.base.name,
         checks_conclusion,
         ci_source,
-        touches_github,
+        additions: pull.additions,
+        deletions: pull.deletions,
+        changed_files: pull.changed_files,
+        files_complete,
+        touches_github: rules::reported_touches_github(seen_touch, files_complete),
         merged_at: pull.merged_at,
     })
     .map_err(|_| "encode_failed")
