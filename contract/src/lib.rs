@@ -753,9 +753,13 @@ impl Contract {
         if new_deposit == 0 {
             return next;
         }
+        // Weight 0: the deposit runs on its static gas, and all unused gas goes to
+        // `on_fee_ready`, which must fund both AI runs and `on_reviewed` (measured in sandbox:
+        // an even split left it ~120 Tgas for ~170 Tgas of calls).
         ext_ft::ext(self.token.clone())
             .with_attached_deposit(ONE_YOCTO)
             .with_static_gas(FEE_DEPOSIT_GAS)
+            .with_unused_gas_weight(0)
             .ft_transfer_call(
                 self.outlayer.clone(),
                 U128(new_deposit),
