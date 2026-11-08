@@ -39,6 +39,8 @@ pub struct CheckerOutput {
     pub merged_at: Option<String>,
     pub diff_bytes: u64,
     pub diff_too_large: bool,
+    /// GitHub's own count; the AIs check their diff lists exactly this many files (D31).
+    pub changed_files: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,7 @@ pub enum Refusal {
     NoIndependentApproval,
     ChecksNotSuccessful,
     IncompleteFileList,
+    EmptyPr,
     TouchesGithub,
     MergedBeforeMilestone,
     NotTheGithubIdHolder,
@@ -86,6 +89,7 @@ pub struct Facts {
     pub head_sha: String,
     pub diff_bytes: u64,
     pub diff_too_large: bool,
+    pub changed_files: u64,
 }
 
 /// Every hard fact except the merge ones holds for open PRs too (D36). The merge
@@ -112,6 +116,9 @@ pub fn evaluate(output: &CheckerOutput, terms: &Terms) -> Result<Facts, Refusal>
     if !output.files_complete {
         return Err(Refusal::IncompleteFileList);
     }
+    if output.changed_files == 0 {
+        return Err(Refusal::EmptyPr);
+    }
     if output.touches_github {
         return Err(Refusal::TouchesGithub);
     }
@@ -131,6 +138,7 @@ pub fn evaluate(output: &CheckerOutput, terms: &Terms) -> Result<Facts, Refusal>
         head_sha: output.head_sha.clone(),
         diff_bytes: output.diff_bytes,
         diff_too_large: output.diff_too_large,
+        changed_files: output.changed_files,
     })
 }
 
@@ -183,22 +191,27 @@ pub enum AiAnswer {
 #[serde(crate = "near_sdk::serde")]
 struct AiOutput {
     status: String,
+    role: String,
     head_sha: String,
     verdict: Option<String>,
 }
 
-/// A verdict counts only if the enclave verified the model's signature and it names this commit.
-pub fn read_ai(bytes: &[u8], head_sha: &str) -> AiAnswer {
+/// A verdict counts only if the enclave verified the model's signature, it names this
+/// commit, and it came from the expected role. One build serves both roles, chosen by
+/// the OutLayer project, so a pin naming the wrong project can't stand in for the other AI.
+pub fn read_ai(bytes: &[u8], head_sha: &str, role: &str) -> AiAnswer {
     let Ok(out) = near_sdk::serde_json::from_slice::<AiOutput>(bytes) else {
         return AiAnswer::Failed;
     };
-    if out.head_sha != head_sha {
+    if out.head_sha != head_sha || out.role != role {
         return AiAnswer::Failed;
     }
     match (out.status.as_str(), out.verdict.as_deref()) {
         ("verified", Some("meets")) => AiAnswer::Meets,
-        ("verified", Some(v @ ("does_not_meet" | "unclear" | "incomplete_diff"))) => AiAnswer::Objects(v.into()),
+        ("verified", Some(v @ ("does_not_meet" | "unclear"))) => AiAnswer::Objects(v.into()),
+        // Decided in the enclave before any model call, so there's no verdict field.
         ("too_large", _) => AiAnswer::Objects("too_large".into()),
+        ("incomplete_diff", _) => AiAnswer::Objects("incomplete_diff".into()),
         _ => AiAnswer::Failed,
     }
 }

@@ -22,6 +22,7 @@ fn merged() -> CheckerOutput {
         merged_at: Some("2026-11-06T12:00:00Z".into()),
         diff_bytes: 1000,
         diff_too_large: false,
+        changed_files: 3,
     }
 }
 
@@ -91,6 +92,16 @@ fn incomplete_file_list_is_refused() {
 }
 
 #[test]
+fn pr_with_no_changed_files_is_refused() {
+    refused(|o| o.changed_files = 0, Refusal::EmptyPr);
+}
+
+#[test]
+fn changed_files_go_on_to_the_review() {
+    assert_eq!(evaluate(&merged(), &terms()).unwrap().changed_files, 3);
+}
+
+#[test]
 fn touching_github_is_refused() {
     refused(|o| o.touches_github = true, Refusal::TouchesGithub);
 }
@@ -152,7 +163,7 @@ fn open_pr_still_needs_every_other_fact() {
 }
 
 fn facts(merged: bool, head: &str, bytes: u64) -> Facts {
-    Facts { merged, base_sha: BASE.into(), head_sha: head.into(), diff_bytes: bytes, diff_too_large: false }
+    Facts { merged, base_sha: BASE.into(), head_sha: head.into(), diff_bytes: bytes, diff_too_large: false, changed_files: 3 }
 }
 
 #[test]
@@ -183,35 +194,49 @@ fn diff_at_the_cap_is_reviewed() {
     assert_eq!(after_check(&facts(false, HEAD, 100), None, 100), AfterCheck::Review);
 }
 
-fn ai(status: &str, head: &str, verdict: Option<&str>) -> Vec<u8> {
-    near_sdk::serde_json::json!({ "status": status, "head_sha": head, "verdict": verdict }).to_string().into_bytes()
+fn ai(status: &str, role: &str, head: &str, verdict: Option<&str>) -> Vec<u8> {
+    near_sdk::serde_json::json!({ "status": status, "role": role, "head_sha": head, "verdict": verdict })
+        .to_string()
+        .into_bytes()
 }
 
 #[test]
 fn verified_meets_is_meets() {
-    assert_eq!(read_ai(&ai("verified", HEAD, Some("meets")), HEAD), AiAnswer::Meets);
+    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("meets")), HEAD, "judge"), AiAnswer::Meets);
 }
 
 #[test]
 fn every_objection_is_an_objection() {
-    for v in ["does_not_meet", "unclear", "incomplete_diff"] {
-        assert_eq!(read_ai(&ai("verified", HEAD, Some(v)), HEAD), AiAnswer::Objects(v.into()));
+    for v in ["does_not_meet", "unclear"] {
+        assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some(v)), HEAD, "judge"), AiAnswer::Objects(v.into()));
     }
-    assert_eq!(read_ai(&ai("too_large", HEAD, None), HEAD), AiAnswer::Objects("too_large".into()));
+    for status in ["too_large", "incomplete_diff"] {
+        assert_eq!(read_ai(&ai(status, "verifier", HEAD, None), HEAD, "verifier"), AiAnswer::Objects(status.into()));
+    }
 }
 
 #[test]
 fn a_verdict_for_another_commit_is_no_verdict() {
-    assert_eq!(read_ai(&ai("verified", BASE, Some("meets")), HEAD), AiAnswer::Failed);
+    assert_eq!(read_ai(&ai("verified", "judge", BASE, Some("meets")), HEAD, "judge"), AiAnswer::Failed);
+}
+
+#[test]
+fn a_verdict_from_the_other_role_is_no_verdict() {
+    // A verifier pin pointing at the judge's project would get GLM twice.
+    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("meets")), HEAD, "verifier"), AiAnswer::Failed);
+    let no_role = br#"{"status":"verified","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verdict":"meets"}"#;
+    assert_eq!(read_ai(no_role, HEAD, "judge"), AiAnswer::Failed);
 }
 
 #[test]
 fn unverified_errors_and_garbage_are_no_verdict() {
-    assert_eq!(read_ai(&ai("unverified", HEAD, Some("meets")), HEAD), AiAnswer::Failed);
-    assert_eq!(read_ai(&ai("verified", HEAD, Some("approve")), HEAD), AiAnswer::Failed);
-    assert_eq!(read_ai(br#"{"error":"signature_text_mismatch"}"#, HEAD), AiAnswer::Failed);
-    assert_eq!(read_ai(b"null", HEAD), AiAnswer::Failed);
-    assert_eq!(read_ai(b"", HEAD), AiAnswer::Failed);
+    assert_eq!(read_ai(&ai("unverified", "judge", HEAD, Some("meets")), HEAD, "judge"), AiAnswer::Failed);
+    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("approve")), HEAD, "judge"), AiAnswer::Failed);
+    // The model can't answer `incomplete_diff`; only the enclave's pre-check can.
+    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("incomplete_diff")), HEAD, "judge"), AiAnswer::Failed);
+    assert_eq!(read_ai(br#"{"error":"signature_text_mismatch"}"#, HEAD, "judge"), AiAnswer::Failed);
+    assert_eq!(read_ai(b"null", HEAD, "judge"), AiAnswer::Failed);
+    assert_eq!(read_ai(b"", HEAD, "judge"), AiAnswer::Failed);
 }
 
 #[test]

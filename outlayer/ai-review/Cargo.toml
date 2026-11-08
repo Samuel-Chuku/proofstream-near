@@ -1,0 +1,32 @@
+[package]
+name = "proofstream-ai-review"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# One build serves as both judge and verifier: the role comes from the OutLayer
+# project it runs in (see `rules::config_for_project`). OutLayer's reproducible
+# build compiles one directory with no features, so two binaries can't be pinned.
+[[bin]]
+name = "proofstream-ai-review"
+path = "src/main.rs"
+
+[features]
+# Test builds only: alters the response before verifying it. Never in a pinned build.
+tamper-test = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "=0.11.1", default-features = false }
+sha3 = { version = "=0.12.0", default-features = false }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasi-http-client = "0.2.1"
+wasi = "=0.13.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

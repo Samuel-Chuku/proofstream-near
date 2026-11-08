@@ -55,5 +55,5 @@ printf 'The signature covers the exact bytes, so one changed word means no verdi
 printf 'This shows the check rejects altered bytes. It does not show the model is right.\n\n'
 
 if [ "${1:-}" = --tests ]; then
-  (cd "$(dirname "$0")/../outlayer/judge" && cargo test verify:: 2>&1 | grep -E '^test verify|^test result')
+  (cd "$(dirname "$0")/../outlayer/ai-review" && cargo test verify:: 2>&1 | grep -E '^test verify|^test result')
 fi

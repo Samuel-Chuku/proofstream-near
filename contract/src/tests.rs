@@ -139,7 +139,7 @@ fn checker(merged: bool) -> Value {
         "ci_source": "check_runs", "additions": 3, "deletions": 0, "changed_files": 1,
         "files_complete": true, "touches_github": false,
         "merged_at": if merged { Some(MERGED_AT) } else { None },
-        "diff_bytes": 1_000, "diff_too_large": false,
+        "diff_bytes": 1_000, "diff_too_large": false, "changed_files": 3,
     })
 }
 
@@ -170,8 +170,16 @@ fn fee_ready(c: &mut Contract, id: u64, taken: Vec<(u64, U128)>, new_deposit: u1
     c.on_fee_ready(id, acc("anyone.testnet"), MIN_AI_DEPOSIT.saturating_mul(2), taken, U128(new_deposit));
 }
 
-fn ai(verdict: &str, head: &str) -> Value {
-    json!({ "status": "verified", "head_sha": head, "verdict": verdict })
+fn ai(role: &str, verdict: &str, head: &str) -> Value {
+    json!({ "status": "verified", "role": role, "head_sha": head, "verdict": verdict })
+}
+
+fn judge_ai(verdict: &str, head: &str) -> Value {
+    ai("judge", verdict, head)
+}
+
+fn verifier_ai(verdict: &str, head: &str) -> Value {
+    ai("verifier", verdict, head)
 }
 
 fn reviewed(c: &mut Contract, id: u64, judge: PromiseResult, verifier: PromiseResult) {
@@ -466,7 +474,7 @@ fn merged_pr_with_good_facts_passes() {
     let id = passed(&mut c, true);
     assert_eq!(
         state(&c, id),
-        State::HardFactsPassed { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), merged: true }
+        State::HardFactsPassed { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), merged: true, changed_files: 3 }
     );
 }
 
@@ -550,7 +558,7 @@ fn diff_over_the_cap_is_held_without_spending_a_fee() {
 fn a_rejected_pr_cannot_be_claimed_again_here() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("does_not_meet", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("does_not_meet", HEAD)), ok(&verifier_ai("meets", HEAD)));
     set("funder.testnet", NearToken::from_near(0));
     c.funder_reject(id, "not what was asked".into());
     claim(&mut c, id, PR);
@@ -602,7 +610,7 @@ fn a_failed_fee_deposit_undoes_the_attempt() {
 fn both_meet_on_a_merged_pr_starts_the_payout() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("meets", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
     assert_eq!(state(&c, id), State::PayingOut { pr: PR });
 }
 
@@ -610,7 +618,7 @@ fn both_meet_on_a_merged_pr_starts_the_payout() {
 fn both_meet_on_an_open_pr_records_approval_and_moves_no_money() {
     let mut c = new_contract();
     let id = passed(&mut c, false);
-    full_review(&mut c, id, ok(&ai("meets", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
     assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into() });
     assert_eq!(c.get_lock(REPO_ID, PR), Some(PrLock::Locked(id)));
     assert!(logged("verdict_approved_premerge"));
@@ -620,7 +628,7 @@ fn both_meet_on_an_open_pr_records_approval_and_moves_no_money() {
 fn held_by(judge: &str, verifier: &str) {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai(judge, HEAD)), ok(&ai(verifier, HEAD)));
+    full_review(&mut c, id, ok(&judge_ai(judge, HEAD)), ok(&verifier_ai(verifier, HEAD)));
     assert!(matches!(state(&c, id), State::Held { .. }), "{judge}/{verifier}");
 }
 
@@ -636,7 +644,45 @@ fn an_unclear_verifier_holds_for_the_funder() {
 
 #[test]
 fn an_incomplete_diff_holds_for_the_funder() {
-    held_by("meets", "incomplete_diff");
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    // The enclave's own D31 pre-check: a status, with no model verdict.
+    let incomplete = json!({ "status": "incomplete_diff", "role": "verifier", "head_sha": HEAD, "diff_files": 2, "changed_files": 3 });
+    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&incomplete));
+    assert!(matches!(state(&c, id), State::Held { ref reason, .. } if reason == "verifier:incomplete_diff"));
+}
+
+#[test]
+fn a_verdict_from_the_wrong_role_counts_as_no_verdict() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    // Both pins pointing at the judge's project: the second "meets" isn't the verifier's.
+    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&judge_ai("meets", HEAD)));
+    assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
+    assert!(logged("review_retry"));
+}
+
+#[test]
+fn the_ai_input_carries_the_prs_file_count() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review(&mut c, id);
+    fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
+    let inputs: Vec<Value> = near_sdk::test_utils::get_created_receipts()
+        .iter()
+        .flat_map(|r| r.actions.iter())
+        .filter_map(|a| match a {
+            near_sdk::mock::MockAction::FunctionCallWeight { method_name, args, .. }
+                if method_name == b"request_execution" =>
+            {
+                let call: Value = near_sdk::serde_json::from_slice(args).ok()?;
+                near_sdk::serde_json::from_str(call["input_data"].as_str()?).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inputs.len(), 2, "judge and verifier");
+    assert!(inputs.iter().all(|i| i["changed_files"] == 3 && i["head_sha"] == HEAD));
 }
 
 #[test]
@@ -652,7 +698,7 @@ fn a_success_that_returns_a_value_still_counts_as_paid() {
 fn a_verdict_for_another_commit_is_not_a_verdict() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("meets", NEW_HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("meets", NEW_HEAD)), ok(&verifier_ai("meets", HEAD)));
     assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
 }
 
@@ -661,10 +707,10 @@ fn a_failed_run_retries_until_attempts_run_out() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
     for _ in 0..DEFAULT_MAX_PAID_ATTEMPTS - 1 {
-        full_review(&mut c, id, ok(&json!({ "error": "signature_text_mismatch" })), ok(&ai("meets", HEAD)));
+        full_review(&mut c, id, ok(&json!({ "error": "signature_text_mismatch" })), ok(&verifier_ai("meets", HEAD)));
         assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
     }
-    full_review(&mut c, id, ok(&json!({ "error": "signature_text_mismatch" })), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&json!({ "error": "signature_text_mismatch" })), ok(&verifier_ai("meets", HEAD)));
     assert!(matches!(state(&c, id), State::Held { ref reason, .. } if reason == "attempts_exhausted"));
     assert_reconciles(&c);
 }
@@ -673,7 +719,7 @@ fn a_failed_run_retries_until_attempts_run_out() {
 fn a_failed_verifier_run_records_its_fee_as_credit() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("meets", HEAD)), ok(&Value::Null));
+    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&Value::Null));
     let m = c.get_milestone(id).unwrap();
     assert_eq!(m.outlayer_credit, U128(FEE));
     assert_eq!(c.reconcile().outlayer_credit, U128(FEE));
@@ -684,7 +730,7 @@ fn a_failed_verifier_run_records_its_fee_as_credit() {
 fn the_next_review_spends_credit_before_new_money() {
     let mut c = new_contract();
     let a = passed(&mut c, true);
-    full_review(&mut c, a, ok(&ai("meets", HEAD)), ok(&Value::Null));
+    full_review(&mut c, a, ok(&judge_ai("meets", HEAD)), ok(&Value::Null));
     // A second milestone's review spends A's credit, and A can refund that much.
     let b = ready(&mut c);
     claim(&mut c, b, PR + 1);
@@ -704,7 +750,7 @@ fn the_next_review_spends_credit_before_new_money() {
 
 fn approved(c: &mut Contract) -> u64 {
     let id = passed(c, false);
-    full_review(c, id, ok(&ai("meets", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
     id
 }
 
@@ -788,7 +834,7 @@ fn refund_after_an_approval_is_on_the_record() {
 fn only_the_funder_can_release() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("unclear", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("unclear", HEAD)), ok(&verifier_ai("meets", HEAD)));
     set("payee.testnet", NearToken::from_near(0));
     let _ = c.funder_release(id);
 }
@@ -797,7 +843,7 @@ fn only_the_funder_can_release() {
 fn the_funder_can_release_a_held_milestone() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&ai("unclear", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, id, ok(&judge_ai("unclear", HEAD)), ok(&verifier_ai("meets", HEAD)));
     set("funder.testnet", NearToken::from_near(0));
     let _ = c.funder_release(id);
     assert_eq!(state(&c, id), State::PayingOut { pr: PR });
@@ -834,7 +880,7 @@ fn refund_waits_for_the_deadline() {
 fn refund_is_impossible_while_held_or_in_flight() {
     let mut c = new_contract();
     let held = passed(&mut c, true);
-    full_review(&mut c, held, ok(&ai("unclear", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(&mut c, held, ok(&judge_ai("unclear", HEAD)), ok(&verifier_ai("meets", HEAD)));
     let checking = ready(&mut c);
     claim(&mut c, checking, PR + 1);
     for id in [held, checking] {
@@ -873,7 +919,7 @@ fn a_failed_refund_puts_the_milestone_back() {
 
 fn paying(c: &mut Contract) -> u64 {
     let id = passed(c, true);
-    full_review(c, id, ok(&ai("meets", HEAD)), ok(&ai("meets", HEAD)));
+    full_review(c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
     id
 }
 
@@ -882,7 +928,7 @@ fn a_confirmed_payout_is_final_and_spends_the_pr() {
     let mut c = new_contract();
     let id = paying(&mut c);
     set_callback(vec![ok(&Value::Null)]);
-    c.on_transferred(id, U128(BUDGET), Transfer::Payout, State::Reviewing { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), merged: true });
+    c.on_transferred(id, U128(BUDGET), Transfer::Payout, State::Reviewing { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), merged: true, changed_files: 3 });
     assert_eq!(state(&c, id), State::Paid { pr: PR });
     assert_eq!(c.get_lock(REPO_ID, PR), Some(PrLock::Spent(id)));
     assert_eq!(c.reconcile().owed, U128(FEE_BUDGET - FEE));
@@ -929,5 +975,5 @@ fn a_paid_milestone_refunds_only_its_leftover_fee() {
 fn a_stale_review_result_cannot_touch_the_milestone() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    reviewed(&mut c, id, ok(&ai("meets", HEAD)), ok(&ai("meets", HEAD)));
+    reviewed(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
 }

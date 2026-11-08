@@ -117,8 +117,8 @@ pub enum State {
     Funding,
     Funded,
     Checking { pr: u64 },
-    HardFactsPassed { pr: u64, base_sha: String, head_sha: String, merged: bool },
-    Reviewing { pr: u64, base_sha: String, head_sha: String, merged: bool },
+    HardFactsPassed { pr: u64, base_sha: String, head_sha: String, merged: bool, changed_files: u64 },
+    Reviewing { pr: u64, base_sha: String, head_sha: String, merged: bool, changed_files: u64 },
     /// D36: both AIs said `meets` on the open PR at `head_sha`. Pays once it's merged there.
     Approved { pr: u64, head_sha: String },
     Held { pr: u64, head_sha: String, merged: bool, reason: String },
@@ -704,6 +704,7 @@ impl Contract {
                     base_sha: facts.base_sha,
                     head_sha: facts.head_sha,
                     merged: facts.merged,
+                    changed_files: facts.changed_files,
                 };
             }
         }
@@ -720,7 +721,7 @@ impl Contract {
         require!(deposit >= MIN_AI_DEPOSIT.saturating_mul(2), "attach at least 0.06 NEAR");
         let caller = env::predecessor_account_id();
         let m = self.milestone(milestone_id).clone();
-        let State::HardFactsPassed { pr, base_sha, head_sha, merged } = m.state.clone() else {
+        let State::HardFactsPassed { pr, base_sha, head_sha, merged, changed_files } = m.state.clone() else {
             env::panic_str("milestone is not ready for review");
         };
         let fee = m.pins.verifier.fee.0;
@@ -732,7 +733,7 @@ impl Contract {
         let m = self.milestone_mut(milestone_id);
         m.paid_attempts_used += 1;
         m.fee_remaining = U128(m.fee_remaining.0 - fee);
-        m.state = State::Reviewing { pr, base_sha, head_sha, merged };
+        m.state = State::Reviewing { pr, base_sha, head_sha, merged, changed_files };
         // The fee left this milestone; `credited` of it is still in the contract, now owed
         // to the credit owners (moved in `take_credit`), so only the new deposit leaves.
         let new_deposit = fee - credited;
@@ -771,7 +772,7 @@ impl Contract {
         new_deposit: U128,
     ) {
         let m = self.milestone(milestone_id).clone();
-        let State::Reviewing { pr, base_sha, head_sha, merged } = m.state.clone() else {
+        let State::Reviewing { pr, base_sha, head_sha, merged, changed_files } = m.state.clone() else {
             env::panic_str("callback does not match the review in flight");
         };
         let deposited = new_deposit.0 == 0
@@ -786,7 +787,7 @@ impl Contract {
             let m = self.milestone_mut(milestone_id);
             m.paid_attempts_used -= 1;
             m.fee_remaining = U128(m.fee_remaining.0 + fee);
-            m.state = State::HardFactsPassed { pr, base_sha, head_sha, merged };
+            m.state = State::HardFactsPassed { pr, base_sha, head_sha, merged, changed_files };
             self.owed += new_deposit.0;
             self.tokens_held += new_deposit.0;
             let _ = Promise::new(caller).transfer(deposit);
@@ -798,6 +799,7 @@ impl Contract {
             "repo": m.repo_name,
             "base_sha": base_sha,
             "head_sha": head_sha,
+            "changed_files": changed_files,
             "milestone_text": m.milestone_text,
         });
         let half = NearToken::from_yoctonear(deposit.as_yoctonear() / 2);
@@ -832,7 +834,7 @@ impl Contract {
         verifier_deposit: NearToken,
     ) {
         let m = self.milestone(milestone_id).clone();
-        let State::Reviewing { pr, base_sha, head_sha, merged } = m.state.clone() else {
+        let State::Reviewing { pr, base_sha, head_sha, merged, changed_files } = m.state.clone() else {
             env::panic_str("callback does not match the review in flight");
         };
         let judge_raw = env::promise_result_checked(0, MAX_RESULT_BYTES);
@@ -858,11 +860,11 @@ impl Contract {
         if fee_back {
             self.add_credit(milestone_id, m.pins.verifier.fee.0);
         }
-        let read = |r: &Result<Vec<u8>, PromiseError>| match r {
-            Ok(bytes) => rules::read_ai(bytes, &head_sha),
+        let read = |r: &Result<Vec<u8>, PromiseError>, role: &str| match r {
+            Ok(bytes) => rules::read_ai(bytes, &head_sha, role),
             Err(_) => AiAnswer::Failed,
         };
-        let (judge, verifier) = (read(&judge_raw), read(&verifier_raw));
+        let (judge, verifier) = (read(&judge_raw, "judge"), read(&verifier_raw, "verifier"));
         emit(
             "review_result",
             json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha,
@@ -883,7 +885,7 @@ impl Contract {
                 if used >= max || m.fee_remaining.0 < fee {
                     self.hold(milestone_id, pr, head_sha, merged, "attempts_exhausted".into());
                 } else {
-                    self.milestone_mut(milestone_id).state = State::HardFactsPassed { pr, base_sha, head_sha, merged };
+                    self.milestone_mut(milestone_id).state = State::HardFactsPassed { pr, base_sha, head_sha, merged, changed_files };
                     emit("review_retry", json!({ "milestone_id": milestone_id, "pr": pr, "attempts_left": max - used }));
                 }
             }
