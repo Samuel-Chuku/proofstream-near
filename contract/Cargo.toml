@@ -13,6 +13,9 @@ serde_json = "1.0"
 
 [dev-dependencies]
 near-sdk = { version = "5.30.1", features = ["unit-testing"] }
+# Sandbox tests (tests/sandbox.rs): a local NEAR node with mock OutLayer and token contracts.
+near-workspaces = "=0.24.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 
 [profile.release]
 codegen-units = 1

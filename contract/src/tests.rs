@@ -136,7 +136,7 @@ fn checker(merged: bool) -> Value {
         "author_id": PAYEE_ID, "author_login": "Samuel-Chuku",
         "merged_by": if merged { json!({ "id": BOT_ID, "type": "Bot" }) } else { Value::Null },
         "independent_approval": true, "base_branch": "main", "checks_conclusion": "success",
-        "ci_source": "check_runs", "additions": 3, "deletions": 0, "changed_files": 1,
+        "ci_source": "check_runs", "additions": 3, "deletions": 0,
         "files_complete": true, "touches_github": false,
         "merged_at": if merged { Some(MERGED_AT) } else { None },
         "diff_bytes": 1_000, "diff_too_large": false, "changed_files": 3,
