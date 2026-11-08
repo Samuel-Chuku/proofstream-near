@@ -1,87 +1,196 @@
-//! Holds funded milestones and pays one only when an OutLayer checker, pinned to an
-//! exact wasm hash, reports facts that satisfy every rule in `rules`.
+//! ProofStream milestones on NEAR. A funder escrows a budget in a NEP-141 token. It pays
+//! the GitHub id holder's bound account only when the hard facts read in an OutLayer TDX
+//! enclave pass, and two independent AI reviews (judge and verifier, different models and
+//! owners) both say the work meets the milestone. Every enclave build is pinned per
+//! milestone by wasm hash (D28).
 //!
-//! No owner, admin, setter or upgrade method exists: `new` fixes the configuration.
+//! No owner, admin, setter or upgrade method exists. `new` fixes the configuration.
 
+mod events;
 mod rules;
 
+use events::emit;
 use near_sdk::json_types::U128;
-use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::serde_json::{self, json};
-use near_sdk::store::LookupMap;
+use near_sdk::serde::Deserialize;
+use near_sdk::serde_json::{self, json, Value};
+use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{
-    env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, GasWeight, NearToken,
-    PanicOnDefault, Promise, PromiseError,
+    env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, GasWeight, NearToken, PanicOnDefault,
+    Promise, PromiseError, PromiseOrValue,
 };
-pub use rules::{CheckerOutput, Refusal};
+pub use rules::Refusal;
+use rules::{AfterCheck, AiAnswer, CheckerOutput, Probe, ReviewOutcome, Terms};
 
-const MIN_CLAIM_DEPOSIT: NearToken = NearToken::from_millinear(10);
-const REQUEST_MIN_GAS: Gas = Gas::from_tgas(100);
-const ON_CHECKED_GAS: Gas = Gas::from_tgas(60);
-const FT_TRANSFER_GAS: Gas = Gas::from_tgas(15);
-const ON_PAID_GAS: Gas = Gas::from_tgas(10);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
-const MAX_INSTRUCTIONS: u64 = 10_000_000_000;
-const MAX_MEMORY_MB: u32 = 128;
-const MAX_EXECUTION_SECONDS: u64 = 60;
-/// The checker's output is measured at under 500 bytes. A larger result refuses.
-const MAX_CHECKER_OUTPUT_BYTES: usize = 4096;
-
-/// The verifier is pinned in code here because adding it to `new` would change stored state.
-const VERIFIER_PROJECT: &str = "proofstream-verifier-owner.testnet/proofstream-verifier";
-const VERIFIER_VERSION: &str = "9c6eebed7b7f99e68bf239b61083c8c652a630befc97a4eb05cb046ca1efea52";
-const VERIFIER_SECRETS_OWNER: &str = "proofstream-verifier-owner.testnet";
-const VERIFIER_SECRETS_PROFILE: &str = "default";
-/// In the token's minimal units: 0.05 test USDC.
-const VERIFIER_FEE: u128 = 50_000;
-const MIN_VERIFIER_DEPOSIT: NearToken = NearToken::from_millinear(30);
-const VERIFIER_MAX_EXECUTION_SECONDS: u64 = 85;
-const VERIFIER_MAX_INSTRUCTIONS: u64 = 100_000_000_000;
-const VERIFIER_MAX_MEMORY_MB: u32 = 256;
-const FT_TRANSFER_CALL_GAS: Gas = Gas::from_tgas(60);
-const ON_FEE_DEPOSITED_GAS: Gas = Gas::from_tgas(150);
-const ON_VERIFIED_GAS: Gas = Gas::from_tgas(20);
-const MAX_FEE_RESULT_BYTES: usize = 64;
-
-/// Q3. Pinned in code for the same reason as the verifier.
-const BINDER_PROJECT: &str = "proofstream-checker-owner.testnet/proofstream-binder";
-const BINDER_VERSION: &str = "7b9921be0a5a02ed78c03dc4b372607d37d94f4472e292327d8319c02ce39750";
-const BINDER_SECRETS_OWNER: &str = "proofstream-checker-owner.testnet";
-const BINDER_SECRETS_PROFILE: &str = "default";
-const BINDER_MAX_EXECUTION_SECONDS: u64 = 30;
-/// Token storage for the payout account, as `storage_balance_bounds` reports for this token.
-const TOKEN_STORAGE: NearToken = NearToken::from_micronear(1_250);
-/// Sent to a new 64-hex account, which creates it and pays its first transactions.
-const NEW_ACCOUNT_NEAR: NearToken = NearToken::from_millinear(10);
+// Deposits. OutLayer refunds whatever a run doesn't use to the payer.
+const MIN_CLAIM_DEPOSIT: NearToken = NearToken::from_millinear(10);
+const MIN_AI_DEPOSIT: NearToken = NearToken::from_millinear(30);
 const MIN_BIND_COMPUTE: NearToken = NearToken::from_millinear(10);
-const ON_BIND_CHECKED_GAS: Gas = Gas::from_tgas(60);
-const STORAGE_DEPOSIT_GAS: Gas = Gas::from_tgas(10);
-const MAX_GIST_ID_BYTES: usize = 64;
-const BOUND_KEY_PREFIX: &str = "b:";
-const NONCE_HASH_BYTES: usize = 16;
+/// Token storage for the payout account, as `storage_balance_bounds` reports for the test token.
+const TOKEN_STORAGE: NearToken = NearToken::from_micronear(1_250);
+/// D29: sent to a 64-hex account, which creates it and pays its first transactions.
+const IMPLICIT_PROBE: NearToken = NearToken::from_millinear(50);
+/// Charged at creation on top of the milestone's own bytes, for what it grows into later
+/// (state data, binding, used PRs, locks). The excess is never refunded; it's a few mNEAR.
+const STORAGE_HEADROOM_BYTES: u64 = 1_500;
 
+// Gas. Requests share unused gas by weight; the figures are the static minimums.
+const CHECKER_REQUEST_GAS: Gas = Gas::from_tgas(100);
+const AI_REQUEST_GAS: Gas = Gas::from_tgas(60);
+const ON_CHECKED_GAS: Gas = Gas::from_tgas(40);
+const FEE_DEPOSIT_GAS: Gas = Gas::from_tgas(50);
+const ON_FEE_READY_GAS: Gas = Gas::from_tgas(5);
+const ON_REVIEWED_GAS: Gas = Gas::from_tgas(50);
+const FT_TRANSFER_GAS: Gas = Gas::from_tgas(15);
+const ON_TRANSFERRED_GAS: Gas = Gas::from_tgas(10);
+const ON_BOUND_GAS: Gas = Gas::from_tgas(60);
+const ON_PROBED_GAS: Gas = Gas::from_tgas(40);
+const STORAGE_DEPOSIT_GAS: Gas = Gas::from_tgas(10);
+const ON_REGISTERED_GAS: Gas = Gas::from_tgas(10);
+
+// Enclave limits (BUILD_BRIEF 2.4).
+const FACTS_MAX_SECONDS: u64 = 20;
+const FACTS_MAX_INSTRUCTIONS: u64 = 10_000_000_000;
+const FACTS_MAX_MEMORY_MB: u32 = 128;
+const AI_MAX_SECONDS: u64 = 60;
+const AI_MAX_INSTRUCTIONS: u64 = 100_000_000_000;
+const AI_MAX_MEMORY_MB: u32 = 256;
+const SECRETS_PROFILE: &str = "default";
+
+// Result size caps. The OutLayer output limit is 900 bytes; a larger result refuses.
+const MAX_RESULT_BYTES: usize = 1024;
+const MAX_FT_RESULT_BYTES: usize = 64;
+
+// Milestone limits.
 const DEFAULT_MAX_PAID_ATTEMPTS: u32 = 3;
 const MAX_PAID_ATTEMPTS_LIMIT: u32 = 10;
-const MAX_TEXT_BYTES: usize = 2000;
+const DEFAULT_DIFF_CAP_BYTES: u64 = 100_000;
+/// The judge's own `MAX_DIFF_BYTES`: a larger cap could never be reviewed.
+const MAX_DIFF_CAP_BYTES: u64 = 180_000;
+const MAX_TEXT_BYTES: usize = 2_000;
 const MAX_FIELD_BYTES: usize = 100;
-const MAX_REQUIRED_CHECKS: usize = 10;
-const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const MAX_REQUIRED_CHECKS: usize = 8;
+const MAX_REASON_BYTES: usize = 280;
+const MAX_GIST_ID_BYTES: usize = 64;
+const NONCE_HASH_BYTES: usize = 16;
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
 enum StorageKey {
     Milestones,
     PrLocks,
+    UsedPrs,
 }
 
 #[near(serializers = [json, borsh])]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    /// `owner.testnet/name`. The owner's OutLayer secrets are the ones the run reads.
+    pub project_id: String,
+    pub wasm_hash: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifierPin {
+    pub project_id: String,
+    pub wasm_hash: String,
+    /// Paid to the verifier's owner per review, in the token's minimal units (D22).
+    pub fee: U128,
+}
+
+/// D28: fixed at creation, never changed for that milestone.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pins {
+    pub checker: Pin,
+    pub binder: Pin,
+    pub judge: Pin,
+    pub verifier: VerifierPin,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum State {
+    Funding,
     Funded,
-    Checking,
-    Paying,
-    Paid,
+    Checking { pr: u64 },
+    HardFactsPassed { pr: u64, base_sha: String, head_sha: String, merged: bool },
+    Reviewing { pr: u64, base_sha: String, head_sha: String, merged: bool },
+    /// D36: both AIs said `meets` on the open PR at `head_sha`. Pays once it's merged there.
+    Approved { pr: u64, head_sha: String },
+    Held { pr: u64, head_sha: String, merged: bool, reason: String },
+    PayingOut { pr: u64 },
+    PayoutFailed { pr: u64 },
+    Paid { pr: u64 },
+    Refunded,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bound {
+    pub account: AccountId,
+    pub gist_id: String,
+    pub gist_revision: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug)]
+pub struct Milestone {
+    pub funder: AccountId,
+    pub repo_id: u64,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub base_branch: String,
+    pub payee_github_id: u64,
+    pub milestone_text: String,
+    pub required_checks: Vec<String>,
+    pub budget: U128,
+    pub fee_budget: U128,
+    /// Fee not yet spent on reviews.
+    pub fee_remaining: U128,
+    /// Fee owned by this milestone that another milestone's held fee now covers (ledger 0.3).
+    pub fee_refundable: U128,
+    /// This milestone's stablecoin sitting in the contract's OutLayer balance after failed runs.
+    pub outlayer_credit: U128,
+    pub created_at_ns: u64,
+    pub deadline_ns: u64,
+    pub max_paid_attempts: u32,
+    pub paid_attempts_used: u32,
+    pub diff_cap_bytes: u64,
+    pub allow_self_merge: bool,
+    pub pins: Pins,
+    pub payee: Option<Bound>,
+    pub binding_in_flight: bool,
+    pub state: State,
+}
+
+/// Arguments of `create_milestone`.
+#[near(serializers = [json])]
+#[derive(Debug, Clone)]
+pub struct CreateMilestone {
+    pub repo_id: u64,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub base_branch: String,
+    pub payee_github_id: u64,
+    pub milestone_text: String,
+    pub required_checks: Vec<String>,
+    pub budget: U128,
+    pub fee_budget: U128,
+    pub deadline_seconds: u64,
+    pub max_paid_attempts: Option<u32>,
+    pub diff_cap_bytes: Option<u64>,
+    pub allow_self_merge: Option<bool>,
+    pub pins: Pins,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+struct FundMsg {
+    milestone_id: u64,
 }
 
 #[near(serializers = [json, borsh])]
@@ -91,58 +200,37 @@ pub enum PrLock {
     Spent(u64),
 }
 
-#[near(serializers = [json, borsh])]
-#[derive(Clone, Debug)]
-pub struct Milestone {
-    pub funder: AccountId,
-    pub repo_owner: String,
-    pub repo: String,
-    pub repo_id: u64,
-    pub base_branch: String,
-    pub payee_github_id: u64,
-    /// Spike-only shortcut (D12). The build binds this through the Q3 proof instead.
-    pub payee_account: AccountId,
-    pub required_checks: Vec<String>,
-    pub milestone_text: String,
-    pub budget: U128,
-    pub fee_remaining: U128,
-    pub max_paid_attempts: u32,
-    pub created_at_ns: u64,
-    pub status: Status,
-    pub active_pr: Option<u64>,
-}
-
-/// `msg` of the funder's `ft_transfer_call`.
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(crate = "near_sdk::serde")]
-struct CreateMilestone {
-    repo_owner: String,
-    repo: String,
-    repo_id: u64,
-    base_branch: String,
-    payee_github_id: u64,
-    payee_account: AccountId,
-    required_checks: Vec<String>,
-    milestone_text: String,
-    budget: U128,
-    fee: U128,
-    max_paid_attempts: Option<u32>,
-}
-
 #[near(serializers = [json])]
 pub struct Config {
     pub token: AccountId,
     pub outlayer: AccountId,
-    pub checker_project: String,
-    pub checker_version: String,
-    pub secrets_owner: AccountId,
-    pub secrets_profile: String,
+    pub min_budget: U128,
+    pub min_deadline_seconds: u64,
+}
+
+/// `tokens_held` is what this contract has received minus what it has sent, by its own
+/// accounting. `owed` is the sum of every milestone's unpaid budget and fees. They must be
+/// equal, and both must equal the token's `ft_balance_of(this contract)`.
+#[near(serializers = [json])]
+pub struct Reconcile {
+    pub tokens_held: U128,
+    pub owed: U128,
+    pub outlayer_credit: U128,
+}
+
+/// Why money left. Lets `on_transferred` apply exactly one outcome.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transfer {
+    Payout,
+    Refund,
 }
 
 #[ext_contract(ext_ft)]
 #[allow(dead_code)]
 trait FungibleToken {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+    fn ft_transfer_call(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>, msg: String);
     fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>);
 }
 
@@ -151,37 +239,24 @@ trait FungibleToken {
 pub struct Contract {
     token: AccountId,
     outlayer: AccountId,
-    checker_project: String,
-    checker_version: String,
-    secrets_owner: AccountId,
-    secrets_profile: String,
+    min_budget: u128,
+    min_deadline_seconds: u64,
     next_id: u64,
     milestones: LookupMap<u64, Milestone>,
     pr_locks: LookupMap<String, PrLock>,
+    used_prs: LookupSet<String>,
+    /// Milestones with a nonzero `outlayer_credit`, spent oldest first.
+    credit_owners: Vec<u64>,
+    tokens_held: u128,
+    owed: u128,
 }
 
-fn pr_key(repo_id: u64, pr_number: u64) -> String {
-    format!("{repo_id}:{pr_number}")
+fn pr_key(repo_id: u64, pr: u64) -> String {
+    format!("{repo_id}:{pr}")
 }
 
-/// A raw key rather than a struct field, so existing stored state still reads. Spike only.
-fn bound_key(milestone_id: u64) -> Vec<u8> {
-    format!("{BOUND_KEY_PREFIX}{milestone_id}").into_bytes()
-}
-
-fn read_bound(milestone_id: u64) -> Option<AccountId> {
-    let bytes = env::storage_read(&bound_key(milestone_id))?;
-    String::from_utf8(bytes).ok()?.parse().ok()
-}
-
-/// Who a milestone pays. `payee_account` set to this contract means "not chosen yet":
-/// only the proven holder of the GitHub id can choose, through `bind_payee`.
-fn payout_account(milestone_id: u64, m: &Milestone) -> Option<AccountId> {
-    if m.payee_account == env::current_account_id() {
-        read_bound(milestone_id)
-    } else {
-        Some(m.payee_account.clone())
-    }
+fn used_key(milestone_id: u64, pr: u64) -> String {
+    format!("{milestone_id}:{pr}")
 }
 
 fn bind_nonce(milestone_id: u64, created_at_ns: u64) -> String {
@@ -189,443 +264,879 @@ fn bind_nonce(milestone_id: u64, created_at_ns: u64) -> String {
     env::sha256(seed.as_bytes())[..NONCE_HASH_BYTES].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Whether a promise succeeded, whatever it returned. Reading a result with a size cap
+/// reports an oversized success as an error, and treating that as a failed payout would
+/// let `retry_payout` pay twice.
+fn succeeded(index: u64) -> bool {
+    !matches!(env::promise_result_checked(index, 0), Err(PromiseError::Failed))
+}
+
+fn valid_pin(project_id: &str, wasm_hash: &str) -> bool {
+    rules::project_owner(project_id).is_some() && rules::is_sha256_hex(wasm_hash)
+}
+
+fn short_field(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_FIELD_BYTES
+}
+
+/// `request_execution` arguments for a pinned project. The input is always built from
+/// stored state (D15 rule 2); callers never supply it.
+fn request_args(pin: &Pin, input: &Value, ai: bool, payer: &AccountId, attached_usd: Option<u128>) -> Vec<u8> {
+    let owner = rules::project_owner(&pin.project_id).unwrap_or_else(|| env::panic_str("bad pin"));
+    let (seconds, instructions, memory) = if ai {
+        (AI_MAX_SECONDS, AI_MAX_INSTRUCTIONS, AI_MAX_MEMORY_MB)
+    } else {
+        (FACTS_MAX_SECONDS, FACTS_MAX_INSTRUCTIONS, FACTS_MAX_MEMORY_MB)
+    };
+    let mut args = json!({
+        "source": { "Project": { "project_id": pin.project_id, "version_key": pin.wasm_hash }},
+        "resource_limits": {
+            "max_instructions": instructions,
+            "max_memory_mb": memory,
+            "max_execution_seconds": seconds,
+        },
+        "input_data": input.to_string(),
+        "secrets_ref": { "profile": SECRETS_PROFILE, "account_id": owner },
+        "response_format": "Json",
+        "payer_account_id": payer,
+    });
+    if let Some(usd) = attached_usd {
+        args["params"] = json!({ "attached_usd": U128(usd) });
+    }
+    args.to_string().into_bytes()
+}
+
 #[near]
 impl Contract {
     #[init]
-    pub fn new(
-        token: AccountId,
-        outlayer: AccountId,
-        checker_project: String,
-        checker_version: String,
-        secrets_owner: AccountId,
-        secrets_profile: String,
-    ) -> Self {
-        require!(rules::is_sha256_hex(&checker_version), "checker_version must be a wasm sha256");
+    pub fn new(token: AccountId, outlayer: AccountId, min_budget: U128, min_deadline_seconds: u64) -> Self {
+        require!(min_budget.0 > 0, "min_budget must be positive");
         Self {
             token,
             outlayer,
-            checker_project,
-            checker_version,
-            secrets_owner,
-            secrets_profile,
+            min_budget: min_budget.0,
+            min_deadline_seconds,
             next_id: 0,
             milestones: LookupMap::new(StorageKey::Milestones),
             pr_locks: LookupMap::new(StorageKey::PrLocks),
+            used_prs: LookupSet::new(StorageKey::UsedPrs),
+            credit_owners: Vec::new(),
+            tokens_held: 0,
+            owed: 0,
         }
     }
 
-    /// NEP-141 receiver. A panic here makes the token return the whole amount,
-    /// so a milestone can't exist unless it's fully funded.
-    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
-        require!(env::predecessor_account_id() == self.token, "wrong token");
-        let m: CreateMilestone = serde_json::from_str(&msg).unwrap_or_else(|_| env::panic_str("bad msg"));
+    // ---------------------------------------------------------------- create and fund
 
-        let total = m.budget.0.checked_add(m.fee.0).unwrap_or_else(|| env::panic_str("overflow"));
-        require!(m.budget.0 > 0 && m.fee.0 > 0, "budget and fee must be positive");
-        require!(amount.0 == total, "amount must equal budget plus fee");
-        require!(!m.required_checks.is_empty(), "required_checks is empty");
-        require!(m.required_checks.len() <= MAX_REQUIRED_CHECKS, "too many required_checks");
-        require!(m.milestone_text.len() <= MAX_TEXT_BYTES, "milestone_text too long");
+    /// Payable: the funder pays this milestone's storage. Puts it in Funding; it becomes
+    /// Funded when exactly `budget + fee_budget` arrives through `ft_transfer_call`.
+    #[payable]
+    pub fn create_milestone(&mut self, params: CreateMilestone) -> u64 {
+        let p = params;
+        let now_ns = env::block_timestamp();
+        require!(p.budget.0 >= self.min_budget, "budget below min_budget");
+        p.budget.0.checked_add(p.fee_budget.0).unwrap_or_else(|| env::panic_str("overflow"));
+        require!(p.fee_budget.0 >= p.pins.verifier.fee.0, "fee_budget must cover at least one review");
+        let deadline_ns = p.deadline_seconds.saturating_mul(NANOS_PER_SECOND);
+        let min_deadline_ns = now_ns.saturating_add(self.min_deadline_seconds.saturating_mul(NANOS_PER_SECOND));
+        require!(deadline_ns >= min_deadline_ns, "deadline too soon");
+        require!(!p.milestone_text.is_empty() && p.milestone_text.len() <= MAX_TEXT_BYTES, "bad milestone_text");
         require!(
-            [&m.repo_owner, &m.repo, &m.base_branch]
-                .iter()
-                .chain(m.required_checks.iter().collect::<Vec<_>>().iter())
-                .all(|s| !s.is_empty() && s.len() <= MAX_FIELD_BYTES),
+            !p.required_checks.is_empty() && p.required_checks.len() <= MAX_REQUIRED_CHECKS,
+            "required_checks must have 1 to 8 names"
+        );
+        require!(
+            [&p.repo_owner, &p.repo_name, &p.base_branch].iter().all(|s| short_field(s))
+                && p.required_checks.iter().all(|s| short_field(s)),
             "bad field length"
         );
-        let max_paid_attempts = m.max_paid_attempts.unwrap_or(DEFAULT_MAX_PAID_ATTEMPTS);
+        let attempts = p.max_paid_attempts.unwrap_or(DEFAULT_MAX_PAID_ATTEMPTS);
+        require!((1..=MAX_PAID_ATTEMPTS_LIMIT).contains(&attempts), "max_paid_attempts out of range");
+        let diff_cap = p.diff_cap_bytes.unwrap_or(DEFAULT_DIFF_CAP_BYTES);
+        require!((1..=MAX_DIFF_CAP_BYTES).contains(&diff_cap), "diff_cap_bytes out of range");
+        let pins = &p.pins;
         require!(
-            (1..=MAX_PAID_ATTEMPTS_LIMIT).contains(&max_paid_attempts),
-            "max_paid_attempts out of range"
+            valid_pin(&pins.checker.project_id, &pins.checker.wasm_hash)
+                && valid_pin(&pins.binder.project_id, &pins.binder.wasm_hash)
+                && valid_pin(&pins.judge.project_id, &pins.judge.wasm_hash)
+                && valid_pin(&pins.verifier.project_id, &pins.verifier.wasm_hash)
+                && pins.verifier.fee.0 > 0,
+            "bad pins"
         );
 
+        let before = env::storage_usage();
         let id = self.next_id;
         self.next_id += 1;
+        let funder = env::predecessor_account_id();
         self.milestones.insert(
             id,
             Milestone {
-                funder: sender_id,
-                repo_owner: m.repo_owner,
-                repo: m.repo,
-                repo_id: m.repo_id,
-                base_branch: m.base_branch,
-                payee_github_id: m.payee_github_id,
-                payee_account: m.payee_account,
-                required_checks: m.required_checks,
-                milestone_text: m.milestone_text,
-                budget: m.budget,
-                fee_remaining: m.fee,
-                max_paid_attempts,
-                created_at_ns: env::block_timestamp(),
-                status: Status::Funded,
-                active_pr: None,
+                funder: funder.clone(),
+                repo_id: p.repo_id,
+                repo_owner: p.repo_owner,
+                repo_name: p.repo_name,
+                base_branch: p.base_branch,
+                payee_github_id: p.payee_github_id,
+                milestone_text: p.milestone_text,
+                required_checks: p.required_checks,
+                budget: p.budget,
+                fee_budget: p.fee_budget,
+                fee_remaining: p.fee_budget,
+                fee_refundable: U128(0),
+                outlayer_credit: U128(0),
+                created_at_ns: now_ns,
+                deadline_ns,
+                max_paid_attempts: attempts,
+                paid_attempts_used: 0,
+                diff_cap_bytes: diff_cap,
+                allow_self_merge: p.allow_self_merge.unwrap_or(false),
+                pins: p.pins,
+                payee: None,
+                binding_in_flight: false,
+                state: State::Funding,
             },
         );
-        env::log_str(&format!("milestone_created id={id}"));
+        self.milestones.flush();
+        let bytes = env::storage_usage().saturating_sub(before) + STORAGE_HEADROOM_BYTES;
+        let cost = env::storage_byte_cost().saturating_mul(u128::from(bytes));
+        let deposit = env::attached_deposit();
+        require!(deposit >= cost, format!("attach at least {} yoctoNEAR for storage", cost.as_yoctonear()));
+        let change = deposit.saturating_sub(cost);
+        if !change.is_zero() {
+            let _ = Promise::new(funder.clone()).transfer(change);
+        }
+        let m = &self.milestones[&id];
+        emit(
+            "milestone_created",
+            json!({
+                "milestone_id": id, "funder": funder, "repo_id": m.repo_id,
+                "repo": format!("{}/{}", m.repo_owner, m.repo_name), "base_branch": m.base_branch,
+                "payee_github_id": m.payee_github_id, "budget": m.budget, "fee_budget": m.fee_budget,
+                "deadline_ns": U128(u128::from(m.deadline_ns)), "allow_self_merge": m.allow_self_merge,
+                "pins": m.pins,
+            }),
+        );
+        id
+    }
+
+    /// NEP-141 receiver. Only the configured token, only the milestone's funder, only the
+    /// exact total while Funding. Anything else is returned in full.
+    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
+        if env::predecessor_account_id() != self.token {
+            env::panic_str("wrong token");
+        }
+        let Some(id) = serde_json::from_str::<FundMsg>(&msg).ok().map(|f| f.milestone_id) else {
+            emit("funding_refused", json!({ "reason": "bad_msg", "sender": sender_id }));
+            return amount;
+        };
+        let Some(m) = self.milestones.get_mut(&id) else {
+            emit("funding_refused", json!({ "milestone_id": id, "reason": "no_milestone" }));
+            return amount;
+        };
+        let total = m.budget.0 + m.fee_budget.0;
+        let reason = if m.state != State::Funding {
+            Some("not_funding")
+        } else if sender_id != m.funder {
+            Some("not_the_funder")
+        } else if amount.0 != total {
+            Some("wrong_amount")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            emit("funding_refused", json!({ "milestone_id": id, "reason": reason, "amount": amount }));
+            return amount;
+        }
+        m.state = State::Funded;
+        self.tokens_held += total;
+        self.owed += total;
+        emit("milestone_funded", json!({ "milestone_id": id, "amount": amount }));
         U128(0)
     }
 
-    /// Anyone may call. The caller pays the checker's NEAR, and gets the unused part back.
-    #[payable]
-    pub fn claim(&mut self, milestone_id: u64, pr_number: u64) -> Promise {
-        let deposit = env::attached_deposit();
-        require!(deposit >= MIN_CLAIM_DEPOSIT, "attach at least 0.01 NEAR");
-        let caller = env::predecessor_account_id();
+    // ---------------------------------------------------------------- bind the payee
 
-        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        require!(m.status == Status::Funded, "milestone is not claimable");
-        require!(payout_account(milestone_id, &m).is_some(), "payee is not bound yet");
-        let key = pr_key(m.repo_id, pr_number);
-        require!(!self.pr_locks.contains_key(&key), "PR is locked or already paid");
-
-        m.status = Status::Checking;
-        m.active_pr = Some(pr_number);
-        let input = json!({
-            "owner": m.repo_owner,
-            "repo": m.repo,
-            "pr_number": pr_number,
-            "required_checks": m.required_checks,
-        });
-        self.milestones.insert(milestone_id, m);
-        self.pr_locks.insert(key, PrLock::Locked(milestone_id));
-        env::log_str(&format!("claim_started id={milestone_id} pr={pr_number}"));
-
-        let args = json!({
-            "source": { "Project": {
-                "project_id": self.checker_project,
-                "version_key": self.checker_version,
-            }},
-            "resource_limits": {
-                "max_instructions": MAX_INSTRUCTIONS,
-                "max_memory_mb": MAX_MEMORY_MB,
-                "max_execution_seconds": MAX_EXECUTION_SECONDS,
-            },
-            "input_data": input.to_string(),
-            "secrets_ref": { "profile": self.secrets_profile, "account_id": self.secrets_owner },
-            "response_format": "Json",
-            "payer_account_id": caller,
-        });
-
-        // OutLayer reserves its own callback gas from this, so unused gas goes to it too.
-        Promise::new(self.outlayer.clone())
-            .function_call_weight(
-                "request_execution".to_string(),
-                args.to_string().into_bytes(),
-                deposit,
-                REQUEST_MIN_GAS,
-                GasWeight(1),
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(ON_CHECKED_GAS)
-                    .on_checked(milestone_id, pr_number, caller, deposit),
-            )
-    }
-
-    /// Must not panic after the checks at the top: a panic here would leave the lock held.
-    #[private]
-    pub fn on_checked(&mut self, milestone_id: u64, pr_number: u64, caller: AccountId, deposit: NearToken) {
-        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        if m.status != Status::Checking || m.active_pr != Some(pr_number) {
-            env::panic_str("callback does not match the claim in flight");
-        }
-
-        let result = env::promise_result_checked(0, MAX_CHECKER_OUTPUT_BYTES);
-        // A failed `request_execution` means OutLayer refused at admission, and NEAR
-        // returned the deposit to this contract. Every other path refunds through OutLayer.
-        if matches!(result, Err(PromiseError::Failed)) {
-            let _ = Promise::new(caller).transfer(deposit);
-        }
-        let verdict = match result {
-            Err(PromiseError::Failed) => Err(Refusal::CheckerFailed),
-            Err(_) => Err(Refusal::CheckerOutputTooLong),
-            Ok(bytes) => match serde_json::from_slice::<CheckerOutput>(&bytes) {
-                Err(_) => Err(Refusal::UnreadableOutput),
-                Ok(output) => rules::evaluate(
-                    &output,
-                    pr_number,
-                    m.repo_id,
-                    &m.base_branch,
-                    m.payee_github_id,
-                    m.created_at_ns / NANOS_PER_SECOND,
-                ),
-            },
-        };
-
-        let payee = payout_account(milestone_id, &m);
-        let verdict = verdict.and_then(|()| if payee.is_some() { Ok(()) } else { Err(Refusal::PayeeNotBound) });
-        if let Err(refusal) = verdict {
-            m.status = Status::Funded;
-            m.active_pr = None;
-            self.pr_locks.remove(&pr_key(m.repo_id, pr_number));
-            self.milestones.insert(milestone_id, m);
-            env::log_str(&format!("claim_refused id={milestone_id} pr={pr_number} reason={refusal:?}"));
-            return;
-        }
-
-        m.status = Status::Paying;
-        let budget = m.budget;
-        // Checked just above: a missing payee refuses.
-        let payee = payee.unwrap_or_else(|| env::panic_str("no payee"));
-        self.milestones.insert(milestone_id, m);
-        env::log_str(&format!("payout_started id={milestone_id} pr={pr_number}"));
-        let _ = ext_ft::ext(self.token.clone())
-            .with_attached_deposit(ONE_YOCTO)
-            .with_static_gas(FT_TRANSFER_GAS)
-            .ft_transfer(payee, budget, Some(format!("milestone {milestone_id}")))
-            .then(Self::ext(env::current_account_id()).with_static_gas(ON_PAID_GAS).on_paid(milestone_id, pr_number));
-    }
-
-    #[private]
-    pub fn on_paid(&mut self, milestone_id: u64, pr_number: u64) {
-        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        if m.status != Status::Paying || m.active_pr != Some(pr_number) {
-            env::panic_str("callback does not match the payout in flight");
-        }
-        let key = pr_key(m.repo_id, pr_number);
-        if env::promise_result_checked(0, 0).is_ok() {
-            m.status = Status::Paid;
-            self.pr_locks.insert(key, PrLock::Spent(milestone_id));
-            env::log_str(&format!("milestone_paid id={milestone_id} pr={pr_number}"));
-        } else {
-            m.status = Status::Funded;
-            m.active_pr = None;
-            self.pr_locks.remove(&key);
-            env::log_str(&format!("payout_failed id={milestone_id} pr={pr_number}"));
-        }
-        self.milestones.insert(milestone_id, m);
-    }
-
-    /// Q6: pays the verifier's owner from this milestone's fee, then records its verdict.
-    /// Only the milestone's funder can spend its fee. The build calls this from the AI stage,
-    /// after the hard facts pass. A verdict is only logged here: it moves no money.
-    #[payable]
-    pub fn pay_verifier(&mut self, milestone_id: u64, base_sha: String, head_sha: String) -> Promise {
-        let deposit = env::attached_deposit();
-        require!(deposit >= MIN_VERIFIER_DEPOSIT, "attach at least 0.03 NEAR");
-        require!(rules::is_git_sha(&base_sha) && rules::is_git_sha(&head_sha), "bad sha");
-        let caller = env::predecessor_account_id();
-
-        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        require!(caller == m.funder, "only the funder can spend the fee");
-        require!(m.fee_remaining.0 >= VERIFIER_FEE, "fee exhausted");
-        m.fee_remaining = U128(m.fee_remaining.0 - VERIFIER_FEE);
-        self.milestones.insert(milestone_id, m);
-        env::log_str(&format!("verifier_fee_spent id={milestone_id} amount={VERIFIER_FEE}"));
-
-        Promise::new(self.token.clone())
-            .function_call(
-                "ft_transfer_call".to_string(),
-                json!({
-                    "receiver_id": self.outlayer,
-                    "amount": U128(VERIFIER_FEE),
-                    "msg": json!({ "action": "deposit_balance" }).to_string(),
-                })
-                .to_string()
-                .into_bytes(),
-                ONE_YOCTO,
-                FT_TRANSFER_CALL_GAS,
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(ON_FEE_DEPOSITED_GAS)
-                    .with_unused_gas_weight(1)
-                    .on_fee_deposited(milestone_id, base_sha, head_sha, caller, deposit),
-            )
-    }
-
-    #[private]
-    pub fn on_fee_deposited(
-        &mut self,
-        milestone_id: u64,
-        base_sha: String,
-        head_sha: String,
-        caller: AccountId,
-        deposit: NearToken,
-    ) {
-        let mut m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        let deposited = env::promise_result_checked(0, MAX_FEE_RESULT_BYTES)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<U128>(&bytes).ok())
-            .is_some_and(|used| used.0 == VERIFIER_FEE);
-        if !deposited {
-            m.fee_remaining = U128(m.fee_remaining.0 + VERIFIER_FEE);
-            self.milestones.insert(milestone_id, m);
-            let _ = Promise::new(caller).transfer(deposit);
-            env::log_str(&format!("verifier_fee_restored id={milestone_id}"));
-            return;
-        }
-
-        let input = json!({
-            "owner": m.repo_owner,
-            "repo": m.repo,
-            "base_sha": base_sha,
-            "head_sha": head_sha,
-            "milestone_text": m.milestone_text,
-        });
-        let args = json!({
-            "source": { "Project": { "project_id": VERIFIER_PROJECT, "version_key": VERIFIER_VERSION }},
-            "resource_limits": {
-                "max_instructions": VERIFIER_MAX_INSTRUCTIONS,
-                "max_memory_mb": VERIFIER_MAX_MEMORY_MB,
-                "max_execution_seconds": VERIFIER_MAX_EXECUTION_SECONDS,
-            },
-            "input_data": input.to_string(),
-            "secrets_ref": { "profile": VERIFIER_SECRETS_PROFILE, "account_id": VERIFIER_SECRETS_OWNER },
-            "response_format": "Json",
-            "payer_account_id": caller,
-            "params": { "attached_usd": U128(VERIFIER_FEE) },
-        });
-        let _ = Promise::new(self.outlayer.clone())
-            .function_call_weight(
-                "request_execution".to_string(),
-                args.to_string().into_bytes(),
-                deposit,
-                REQUEST_MIN_GAS,
-                GasWeight(1),
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(ON_VERIFIED_GAS)
-                    .on_verified(milestone_id, head_sha, caller, deposit),
-            );
-    }
-
-    #[private]
-    pub fn on_verified(&mut self, milestone_id: u64, head_sha: String, caller: AccountId, deposit: NearToken) {
-        let result = env::promise_result_checked(0, MAX_CHECKER_OUTPUT_BYTES);
-        // As in `on_checked`: an admission failure returns the deposit to this contract.
-        if matches!(result, Err(PromiseError::Failed)) {
-            let _ = Promise::new(caller).transfer(deposit);
-        }
-        match result.ok().and_then(|bytes| rules::read_verifier(&bytes, &head_sha)) {
-            Some(verdict) => env::log_str(&format!("verifier_verdict id={milestone_id} head={head_sha} verdict={verdict}")),
-            None => env::log_str(&format!("verifier_unverified id={milestone_id} head={head_sha}")),
-        }
-    }
-
-    /// Q3: the nonce a binding gist must carry for this milestone.
-    pub fn get_bind_nonce(&self, milestone_id: u64) -> Option<String> {
-        self.milestones.get(&milestone_id).map(|m| bind_nonce(milestone_id, m.created_at_ns))
-    }
-
-    pub fn get_bound_payee(&self, milestone_id: u64) -> Option<AccountId> {
-        read_bound(milestone_id)
-    }
-
-    /// Q3: anyone can submit, because the gist proves the choice, not the caller. The caller
-    /// pays the NEAR. Who that is for a contributor with no wallet is a build decision (D14).
+    /// Anyone can submit: the gist proves the choice, not the caller (D19). The caller pays
+    /// NEAR for the binder run, the D29 probe and the payee's token storage.
     #[payable]
     pub fn bind_payee(&mut self, milestone_id: u64, gist_id: String) -> Promise {
-        let reserve = TOKEN_STORAGE.saturating_add(NEW_ACCOUNT_NEAR);
+        let reserve = TOKEN_STORAGE.saturating_add(IMPLICIT_PROBE);
         let deposit = env::attached_deposit();
-        require!(deposit >= reserve.saturating_add(MIN_BIND_COMPUTE), "attach at least 0.025 NEAR");
-        require!(!gist_id.is_empty() && gist_id.len() <= MAX_GIST_ID_BYTES, "bad gist id");
-        let m = self.milestones.get(&milestone_id).unwrap_or_else(|| env::panic_str("no such milestone"));
-        require!(m.status == Status::Funded, "milestone is not bindable");
-        require!(m.payee_account == env::current_account_id(), "this milestone has a fixed payee");
-        require!(read_bound(milestone_id).is_none(), "already bound");
-
-        let caller = env::predecessor_account_id();
-        let compute = deposit.saturating_sub(reserve);
+        require!(deposit >= reserve.saturating_add(MIN_BIND_COMPUTE), "attach at least 0.06125 NEAR");
+        require!(
+            !gist_id.is_empty()
+                && gist_id.len() <= MAX_GIST_ID_BYTES
+                && gist_id.chars().all(|c| c.is_ascii_alphanumeric()),
+            "bad gist id"
+        );
+        let m = self.milestone_mut(milestone_id);
+        require!(matches!(m.state, State::Funding | State::Funded), "milestone is not bindable");
+        require!(m.payee.is_none(), "already bound");
+        require!(!m.binding_in_flight, "a binding is in flight");
+        m.binding_in_flight = true;
         let input = json!({
             "gist_id": gist_id,
             "contract": env::current_account_id(),
             "milestone_id": milestone_id,
             "nonce": bind_nonce(milestone_id, m.created_at_ns),
         });
-        let args = json!({
-            "source": { "Project": { "project_id": BINDER_PROJECT, "version_key": BINDER_VERSION }},
-            "resource_limits": {
-                "max_instructions": MAX_INSTRUCTIONS,
-                "max_memory_mb": MAX_MEMORY_MB,
-                "max_execution_seconds": BINDER_MAX_EXECUTION_SECONDS,
-            },
-            "input_data": input.to_string(),
-            "secrets_ref": { "profile": BINDER_SECRETS_PROFILE, "account_id": BINDER_SECRETS_OWNER },
-            "response_format": "Json",
-            "payer_account_id": caller,
-        });
+        let caller = env::predecessor_account_id();
+        let compute = deposit.saturating_sub(reserve);
+        let args = request_args(&m.pins.binder, &input, false, &caller, None);
+        emit("bind_started", json!({ "milestone_id": milestone_id, "gist_id": gist_id }));
         Promise::new(self.outlayer.clone())
-            .function_call_weight(
-                "request_execution".to_string(),
-                args.to_string().into_bytes(),
-                compute,
-                REQUEST_MIN_GAS,
-                GasWeight(1),
-            )
+            .function_call_weight("request_execution", args, compute, CHECKER_REQUEST_GAS, GasWeight(1))
             .then(
                 Self::ext(env::current_account_id())
-                    .with_static_gas(ON_BIND_CHECKED_GAS)
-                    .on_bind_checked(milestone_id, caller, compute, reserve),
+                    .with_static_gas(ON_BOUND_GAS)
+                    .on_bound(milestone_id, gist_id, caller, compute, reserve),
             )
     }
 
     #[private]
-    pub fn on_bind_checked(&mut self, milestone_id: u64, caller: AccountId, compute: NearToken, reserve: NearToken) {
-        let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
-        let result = env::promise_result_checked(0, MAX_CHECKER_OUTPUT_BYTES);
+    pub fn on_bound(
+        &mut self,
+        milestone_id: u64,
+        gist_id: String,
+        caller: AccountId,
+        compute: NearToken,
+        reserve: NearToken,
+    ) {
+        let result = env::promise_result_checked(0, MAX_RESULT_BYTES);
+        let contract = env::current_account_id();
+        let m = self.milestone_mut(milestone_id);
+        // Admission failed: NEAR returned the compute deposit here, not to the caller.
         let admission_failed = matches!(result, Err(PromiseError::Failed));
-        let outcome = match result {
-            Err(_) => Err(Refusal::CheckerFailed),
-            Ok(bytes) => rules::evaluate_binding(
+        let outcome = result.map_err(|_| Refusal::CheckerFailed).and_then(|bytes| {
+            rules::evaluate_binding(
                 &bytes,
-                env::current_account_id().as_str(),
+                contract.as_str(),
                 milestone_id,
                 &bind_nonce(milestone_id, m.created_at_ns),
                 m.payee_github_id,
-            ),
-        };
-        let outcome = outcome.and_then(|account| {
-            if read_bound(milestone_id).is_some() {
-                Err(Refusal::AlreadyBound)
-            } else if m.status != Status::Funded {
-                Err(Refusal::NotFunded)
-            } else {
-                Ok(account)
-            }
+            )
         });
+        let outcome = outcome.and_then(|b| rules::probe_for(b.account.as_str()).map(|probe| (b, probe)));
         match outcome {
             Err(refusal) => {
+                m.binding_in_flight = false;
                 let back = if admission_failed { reserve.saturating_add(compute) } else { reserve };
                 let _ = Promise::new(caller).transfer(back);
-                env::log_str(&format!("bind_refused id={milestone_id} reason={refusal:?}"));
+                emit("bind_refused", json!({ "milestone_id": milestone_id, "reason": format!("{refusal:?}") }));
             }
-            Ok(account) => {
-                env::storage_write(&bound_key(milestone_id), account.as_bytes());
-                env::log_str(&format!("payee_bound id={milestone_id} account={account}"));
-                let _ = ext_ft::ext(self.token.clone())
-                    .with_attached_deposit(TOKEN_STORAGE)
-                    .with_static_gas(STORAGE_DEPOSIT_GAS)
-                    .storage_deposit(Some(account.clone()), Some(true));
-                // Only a 64-hex account can be created by a transfer. A named one must already exist.
-                let (to, amount) = if rules::is_implicit_account(account.as_str()) {
-                    (account, NEW_ACCOUNT_NEAR)
-                } else {
-                    (caller, NEW_ACCOUNT_NEAR)
+            Ok((binding, probe)) => {
+                // D29: prove the account exists (or create it) before anything is recorded.
+                let amount = match probe {
+                    Probe::Named => ONE_YOCTO,
+                    Probe::Implicit => IMPLICIT_PROBE,
                 };
-                let _ = Promise::new(to).transfer(amount);
+                let leftover = reserve.saturating_sub(TOKEN_STORAGE).saturating_sub(amount);
+                let _ = Promise::new(binding.account.clone()).transfer(amount).then(
+                    Self::ext(contract)
+                        .with_static_gas(ON_PROBED_GAS)
+                        .on_probed(milestone_id, binding.account, gist_id, binding.revision, caller, leftover),
+                );
             }
         }
     }
+
+    #[private]
+    pub fn on_probed(
+        &mut self,
+        milestone_id: u64,
+        account: AccountId,
+        gist_id: String,
+        revision: String,
+        caller: AccountId,
+        leftover: NearToken,
+    ) {
+        let probed = succeeded(0);
+        let m = self.milestone_mut(milestone_id);
+        if !probed {
+            // A transfer to a missing named account fails and NEAR refunds it here.
+            m.binding_in_flight = false;
+            let _ = Promise::new(caller).transfer(leftover.saturating_add(TOKEN_STORAGE).saturating_add(ONE_YOCTO));
+            emit("bind_refused", json!({ "milestone_id": milestone_id, "reason": "AccountMissing", "account": account }));
+            return;
+        }
+        if !leftover.is_zero() {
+            let _ = Promise::new(caller.clone()).transfer(leftover);
+        }
+        // Only now: `storage_deposit` succeeds even for a missing account (the D23 strand).
+        let _ = ext_ft::ext(self.token.clone())
+            .with_attached_deposit(TOKEN_STORAGE)
+            .with_static_gas(STORAGE_DEPOSIT_GAS)
+            .storage_deposit(Some(account.clone()), Some(true))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_REGISTERED_GAS)
+                    .on_registered(milestone_id, account, gist_id, revision),
+            );
+    }
+
+    #[private]
+    pub fn on_registered(&mut self, milestone_id: u64, account: AccountId, gist_id: String, revision: String) {
+        let ok = succeeded(0);
+        let m = self.milestone_mut(milestone_id);
+        m.binding_in_flight = false;
+        if !ok {
+            emit("bind_refused", json!({ "milestone_id": milestone_id, "reason": "StorageFailed" }));
+            return;
+        }
+        if m.payee.is_some() || !matches!(m.state, State::Funding | State::Funded) {
+            emit("bind_refused", json!({ "milestone_id": milestone_id, "reason": "WrongState" }));
+            return;
+        }
+        emit(
+            "payee_bound",
+            json!({ "milestone_id": milestone_id, "account": account, "gist_id": gist_id, "gist_revision": revision }),
+        );
+        m.payee = Some(Bound { account, gist_id, gist_revision: revision });
+    }
+
+    // ---------------------------------------------------------------- claim: hard facts
+
+    /// Anyone may call. The caller pays the checker's NEAR and gets the unused part back.
+    /// From Funded it takes any unused PR; from Approved, only the approved PR (D36).
+    #[payable]
+    pub fn claim(&mut self, milestone_id: u64, pr_number: u64) -> Promise {
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_CLAIM_DEPOSIT, "attach at least 0.01 NEAR");
+        let caller = env::predecessor_account_id();
+        let key = {
+            let m = self.milestone(milestone_id);
+            require!(m.payee.is_some(), "payee is not bound yet");
+            pr_key(m.repo_id, pr_number)
+        };
+        let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        match &m.state {
+            State::Funded => {
+                require!(!self.pr_locks.contains_key(&key), "PR is locked or already paid");
+                require!(!self.used_prs.contains(&used_key(milestone_id, pr_number)), "PR was used on this milestone");
+                self.pr_locks.insert(key, PrLock::Locked(milestone_id));
+            }
+            State::Approved { pr, .. } => require!(*pr == pr_number, "only the approved PR can be claimed"),
+            _ => env::panic_str("milestone is not claimable"),
+        }
+        let input = json!({
+            "owner": m.repo_owner,
+            "repo": m.repo_name,
+            "pr_number": pr_number,
+            "required_checks": m.required_checks,
+        });
+        let args = request_args(&m.pins.checker, &input, false, &caller, None);
+        let from_approved = matches!(m.state, State::Approved { .. });
+        let approved_head = match &m.state {
+            State::Approved { head_sha, .. } => Some(head_sha.clone()),
+            _ => None,
+        };
+        self.milestone_mut(milestone_id).state = State::Checking { pr: pr_number };
+        emit("claim_started", json!({ "milestone_id": milestone_id, "pr": pr_number, "from_approved": from_approved }));
+        Promise::new(self.outlayer.clone())
+            .function_call_weight("request_execution", args, deposit, CHECKER_REQUEST_GAS, GasWeight(1))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_CHECKED_GAS)
+                    .on_checked(milestone_id, pr_number, approved_head, caller, deposit),
+            )
+    }
+
+    /// Must not panic after the stage check: a panic would leave the lock held.
+    #[private]
+    pub fn on_checked(
+        &mut self,
+        milestone_id: u64,
+        pr_number: u64,
+        approved_head: Option<String>,
+        caller: AccountId,
+        deposit: NearToken,
+    ) {
+        let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        if m.state != (State::Checking { pr: pr_number }) {
+            env::panic_str("callback does not match the claim in flight");
+        }
+        let result = env::promise_result_checked(0, MAX_RESULT_BYTES);
+        if matches!(result, Err(PromiseError::Failed)) {
+            let _ = Promise::new(caller).transfer(deposit);
+        }
+        let terms = Terms {
+            pr_number,
+            repo_id: m.repo_id,
+            base_branch: &m.base_branch,
+            payee_github_id: m.payee_github_id,
+            created_at_seconds: m.created_at_ns / NANOS_PER_SECOND,
+            allow_self_merge: m.allow_self_merge,
+        };
+        let facts = match result {
+            Err(_) => Err(Refusal::CheckerFailed),
+            Ok(bytes) => match serde_json::from_slice::<CheckerOutput>(&bytes) {
+                Err(_) => Err(Refusal::UnreadableOutput),
+                Ok(output) => rules::evaluate(&output, &terms),
+            },
+        };
+        let back_to = match &approved_head {
+            Some(head) => State::Approved { pr: pr_number, head_sha: head.clone() },
+            None => State::Funded,
+        };
+        let facts = match facts {
+            Ok(f) => f,
+            Err(refusal) => {
+                self.refuse_claim(milestone_id, pr_number, back_to, &format!("{refusal:?}"));
+                return;
+            }
+        };
+        match rules::after_check(&facts, approved_head.as_deref(), m.diff_cap_bytes) {
+            AfterCheck::StillOpen => {
+                self.refuse_claim(milestone_id, pr_number, back_to, "NotMerged");
+            }
+            AfterCheck::PayNow => {
+                emit("hard_facts_passed", json!({ "milestone_id": milestone_id, "pr": pr_number, "head_sha": facts.head_sha, "merged": true, "approved_premerge": true }));
+                let _ = self.start_payout(milestone_id);
+            }
+            AfterCheck::TooLarge => {
+                let reason = format!("too_large:{}", facts.diff_bytes);
+                self.hold(milestone_id, pr_number, facts.head_sha, facts.merged, reason);
+            }
+            AfterCheck::Review => {
+                emit("hard_facts_passed", json!({ "milestone_id": milestone_id, "pr": pr_number, "head_sha": facts.head_sha, "merged": facts.merged }));
+                self.milestone_mut(milestone_id).state = State::HardFactsPassed {
+                    pr: pr_number,
+                    base_sha: facts.base_sha,
+                    head_sha: facts.head_sha,
+                    merged: facts.merged,
+                };
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- review: both AIs
+
+    /// D33: anyone may call once the hard facts pass. The attached NEAR is split between the
+    /// judge and the verifier runs; unused NEAR goes back to the caller. The verifier's fee
+    /// comes from this milestone's fee budget, using pooled OutLayer credit first (0.3).
+    #[payable]
+    pub fn review(&mut self, milestone_id: u64) -> Promise {
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_AI_DEPOSIT.saturating_mul(2), "attach at least 0.06 NEAR");
+        let caller = env::predecessor_account_id();
+        let m = self.milestone(milestone_id).clone();
+        let State::HardFactsPassed { pr, base_sha, head_sha, merged } = m.state.clone() else {
+            env::panic_str("milestone is not ready for review");
+        };
+        let fee = m.pins.verifier.fee.0;
+        require!(m.paid_attempts_used < m.max_paid_attempts, "no paid attempts left");
+        require!(m.fee_remaining.0 >= fee, "fee exhausted");
+
+        let taken = self.take_credit(fee);
+        let credited: u128 = taken.iter().map(|(_, a)| a.0).sum();
+        let m = self.milestone_mut(milestone_id);
+        m.paid_attempts_used += 1;
+        m.fee_remaining = U128(m.fee_remaining.0 - fee);
+        m.state = State::Reviewing { pr, base_sha, head_sha, merged };
+        // The fee left this milestone; `credited` of it is still in the contract, now owed
+        // to the credit owners (moved in `take_credit`), so only the new deposit leaves.
+        let new_deposit = fee - credited;
+        self.owed -= new_deposit;
+        self.tokens_held -= new_deposit;
+        let attempt = self.milestone(milestone_id).paid_attempts_used;
+        emit("review_started", json!({ "milestone_id": milestone_id, "pr": pr, "attempt": attempt, "fee": U128(fee), "from_credit": U128(credited) }));
+
+        let next = Self::ext(env::current_account_id())
+            .with_static_gas(ON_FEE_READY_GAS)
+            .with_unused_gas_weight(1)
+            .on_fee_ready(milestone_id, caller, deposit, taken, U128(new_deposit));
+        if new_deposit == 0 {
+            return next;
+        }
+        ext_ft::ext(self.token.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(FEE_DEPOSIT_GAS)
+            .ft_transfer_call(
+                self.outlayer.clone(),
+                U128(new_deposit),
+                None,
+                json!({ "action": "deposit_balance" }).to_string(),
+            )
+            .then(next)
+    }
+
+    /// Starts both AI runs once the fee sits in this contract's OutLayer balance.
+    #[private]
+    pub fn on_fee_ready(
+        &mut self,
+        milestone_id: u64,
+        caller: AccountId,
+        deposit: NearToken,
+        taken: Vec<(u64, U128)>,
+        new_deposit: U128,
+    ) {
+        let m = self.milestone(milestone_id).clone();
+        let State::Reviewing { pr, base_sha, head_sha, merged } = m.state.clone() else {
+            env::panic_str("callback does not match the review in flight");
+        };
+        let deposited = new_deposit.0 == 0
+            || env::promise_result_checked(0, MAX_FT_RESULT_BYTES)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<U128>(&b).ok())
+                .is_some_and(|used| used == new_deposit);
+        if !deposited {
+            // The token refunded the deposit: undo the attempt, the fee and the credit move.
+            let fee = m.pins.verifier.fee.0;
+            self.restore_credit(&taken);
+            let m = self.milestone_mut(milestone_id);
+            m.paid_attempts_used -= 1;
+            m.fee_remaining = U128(m.fee_remaining.0 + fee);
+            m.state = State::HardFactsPassed { pr, base_sha, head_sha, merged };
+            self.owed += new_deposit.0;
+            self.tokens_held += new_deposit.0;
+            let _ = Promise::new(caller).transfer(deposit);
+            emit("review_refused", json!({ "milestone_id": milestone_id, "reason": "FeeDepositFailed" }));
+            return;
+        }
+        let input = json!({
+            "owner": m.repo_owner,
+            "repo": m.repo_name,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "milestone_text": m.milestone_text,
+        });
+        let half = NearToken::from_yoctonear(deposit.as_yoctonear() / 2);
+        let verifier_pin = Pin { project_id: m.pins.verifier.project_id.clone(), wasm_hash: m.pins.verifier.wasm_hash.clone() };
+        let judge = Promise::new(self.outlayer.clone()).function_call_weight(
+            "request_execution",
+            request_args(&m.pins.judge, &input, true, &caller, None),
+            half,
+            AI_REQUEST_GAS,
+            GasWeight(1),
+        );
+        let verifier = Promise::new(self.outlayer.clone()).function_call_weight(
+            "request_execution",
+            request_args(&verifier_pin, &input, true, &caller, Some(m.pins.verifier.fee.0)),
+            deposit.saturating_sub(half),
+            AI_REQUEST_GAS,
+            GasWeight(1),
+        );
+        let _ = judge.and(verifier).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(ON_REVIEWED_GAS)
+                .on_reviewed(milestone_id, caller, half, deposit.saturating_sub(half)),
+        );
+    }
+
+    #[private]
+    pub fn on_reviewed(
+        &mut self,
+        milestone_id: u64,
+        caller: AccountId,
+        judge_deposit: NearToken,
+        verifier_deposit: NearToken,
+    ) {
+        let m = self.milestone(milestone_id).clone();
+        let State::Reviewing { pr, base_sha, head_sha, merged } = m.state.clone() else {
+            env::panic_str("callback does not match the review in flight");
+        };
+        let judge_raw = env::promise_result_checked(0, MAX_RESULT_BYTES);
+        let verifier_raw = env::promise_result_checked(1, MAX_RESULT_BYTES);
+        // Admission failures return NEAR here; OutLayer refunds every other path itself.
+        let mut back = NearToken::from_yoctonear(0);
+        if matches!(judge_raw, Err(PromiseError::Failed)) {
+            back = back.saturating_add(judge_deposit);
+        }
+        if matches!(verifier_raw, Err(PromiseError::Failed)) {
+            back = back.saturating_add(verifier_deposit);
+        }
+        if !back.is_zero() {
+            let _ = Promise::new(caller).transfer(back);
+        }
+        // OutLayer returns `null` for a failed or timed-out run and puts the fee back in this
+        // contract's balance; a refused admission never took it. Either way it's credit.
+        let fee_back = match &verifier_raw {
+            Err(PromiseError::Failed) => true,
+            Ok(bytes) => bytes.as_slice() == b"null",
+            Err(_) => false,
+        };
+        if fee_back {
+            self.add_credit(milestone_id, m.pins.verifier.fee.0);
+        }
+        let read = |r: &Result<Vec<u8>, PromiseError>| match r {
+            Ok(bytes) => rules::read_ai(bytes, &head_sha),
+            Err(_) => AiAnswer::Failed,
+        };
+        let (judge, verifier) = (read(&judge_raw), read(&verifier_raw));
+        emit(
+            "review_result",
+            json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha,
+                    "judge": format!("{judge:?}"), "verifier": format!("{verifier:?}"), "fee_credited": fee_back }),
+        );
+        match rules::combine(&judge, &verifier) {
+            ReviewOutcome::BothMeet if merged => {
+                let _ = self.start_payout(milestone_id);
+            }
+            ReviewOutcome::BothMeet => {
+                emit("verdict_approved_premerge", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha }));
+                self.milestone_mut(milestone_id).state = State::Approved { pr, head_sha };
+            }
+            ReviewOutcome::Held(reason) => self.hold(milestone_id, pr, head_sha, merged, reason),
+            ReviewOutcome::Retry => {
+                let fee = m.pins.verifier.fee.0;
+                let (used, max) = (m.paid_attempts_used, m.max_paid_attempts);
+                if used >= max || m.fee_remaining.0 < fee {
+                    self.hold(milestone_id, pr, head_sha, merged, "attempts_exhausted".into());
+                } else {
+                    self.milestone_mut(milestone_id).state = State::HardFactsPassed { pr, base_sha, head_sha, merged };
+                    emit("review_retry", json!({ "milestone_id": milestone_id, "pr": pr, "attempts_left": max - used }));
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- funder decisions
+
+    /// Held can only be released (pay the bound payee) or rejected (0.2).
+    pub fn funder_release(&mut self, milestone_id: u64) -> Promise {
+        let m = self.milestone(milestone_id);
+        require!(env::predecessor_account_id() == m.funder, "only the funder");
+        let State::Held { pr, .. } = m.state else { env::panic_str("milestone is not held") };
+        emit("funder_released", json!({ "milestone_id": milestone_id, "pr": pr }));
+        self.start_payout(milestone_id)
+    }
+
+    /// Held or Approved back to Funded. The PR can't be used on this milestone again.
+    pub fn funder_reject(&mut self, milestone_id: u64, reason: String) {
+        require!(!reason.is_empty() && reason.len() <= MAX_REASON_BYTES, "reason must be 1 to 280 bytes");
+        let m = self.milestone(milestone_id);
+        require!(env::predecessor_account_id() == m.funder, "only the funder");
+        let (pr, approved) = match &m.state {
+            State::Held { pr, .. } => (*pr, false),
+            State::Approved { pr, .. } => (*pr, true),
+            _ => env::panic_str("milestone is not held or approved"),
+        };
+        let repo_id = m.repo_id;
+        self.pr_locks.remove(&pr_key(repo_id, pr));
+        self.used_prs.insert(used_key(milestone_id, pr));
+        self.milestone_mut(milestone_id).state = State::Funded;
+        emit("funder_rejected", json!({ "milestone_id": milestone_id, "pr": pr, "reason": reason, "was_approved_premerge": approved }));
+    }
+
+    /// The funder, after the deadline, from Funding, Funded, PayoutFailed or Approved (0.2,
+    /// D36). Returns the unpaid budget, unspent fee and the fee others now cover for this
+    /// milestone. A Paid milestone can refund only its leftover fee, at any time.
+    pub fn refund(&mut self, milestone_id: u64) -> PromiseOrValue<()> {
+        let m = self.milestone(milestone_id).clone();
+        require!(env::predecessor_account_id() == m.funder, "only the funder");
+        let after_deadline = env::block_timestamp() >= m.deadline_ns;
+        let budget = match &m.state {
+            State::Funding => {
+                // Nothing was deposited: close it without a transfer.
+                require!(after_deadline, "deadline has not passed");
+                self.milestone_mut(milestone_id).state = State::Refunded;
+                emit("milestone_refunded", json!({ "milestone_id": milestone_id, "amount": U128(0) }));
+                return PromiseOrValue::Value(());
+            }
+            State::Funded | State::PayoutFailed { .. } | State::Approved { .. } => {
+                require!(after_deadline, "deadline has not passed");
+                m.budget.0
+            }
+            State::Paid { .. } => 0,
+            _ => env::panic_str("milestone cannot be refunded in this state"),
+        };
+        let amount = budget + m.fee_remaining.0 + m.fee_refundable.0;
+        require!(amount > 0, "nothing to refund");
+        if let State::Approved { pr, head_sha } = &m.state {
+            emit("refund_after_approval", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha }));
+        }
+        if let State::Approved { pr, .. } | State::PayoutFailed { pr } = &m.state {
+            self.pr_locks.remove(&pr_key(m.repo_id, *pr));
+        }
+        let was = m.state.clone();
+        let m = self.milestone_mut(milestone_id);
+        if !matches!(was, State::Paid { .. }) {
+            m.state = State::Refunded;
+        }
+        let funder = m.funder.clone();
+        emit("refund_started", json!({ "milestone_id": milestone_id, "amount": U128(amount) }));
+        PromiseOrValue::Promise(self.send(milestone_id, funder, amount, Transfer::Refund, was))
+    }
+
+    /// Anyone may retry a failed payout.
+    pub fn retry_payout(&mut self, milestone_id: u64) -> Promise {
+        let State::PayoutFailed { .. } = self.milestone(milestone_id).state else {
+            env::panic_str("payout has not failed");
+        };
+        self.start_payout(milestone_id)
+    }
+
+    #[private]
+    pub fn on_transferred(&mut self, milestone_id: u64, amount: U128, kind: Transfer, was: State) {
+        let ok = succeeded(0);
+        let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
+        match (kind, ok) {
+            (Transfer::Payout, true) => {
+                let State::PayingOut { pr } = m.state else { env::panic_str("not paying out") };
+                self.tokens_held -= amount.0;
+                self.owed -= amount.0;
+                self.pr_locks.insert(pr_key(m.repo_id, pr), PrLock::Spent(milestone_id));
+                let mm = self.milestone_mut(milestone_id);
+                mm.budget = U128(0);
+                mm.state = State::Paid { pr };
+                emit("milestone_paid", json!({ "milestone_id": milestone_id, "pr": pr, "amount": amount, "to": m.payee.map(|p| p.account) }));
+            }
+            (Transfer::Payout, false) => {
+                let State::PayingOut { pr } = m.state else { env::panic_str("not paying out") };
+                self.milestone_mut(milestone_id).state = State::PayoutFailed { pr };
+                emit("payout_failed", json!({ "milestone_id": milestone_id, "pr": pr }));
+            }
+            (Transfer::Refund, true) => {
+                self.tokens_held -= amount.0;
+                self.owed -= amount.0;
+                let mm = self.milestone_mut(milestone_id);
+                mm.budget = U128(0);
+                mm.fee_remaining = U128(0);
+                mm.fee_refundable = U128(0);
+                emit("milestone_refunded", json!({ "milestone_id": milestone_id, "amount": amount }));
+            }
+            (Transfer::Refund, false) => {
+                // Put the milestone back as it was, so the funder can try again.
+                if let State::Approved { pr, .. } | State::PayoutFailed { pr } = &was {
+                    self.pr_locks.insert(pr_key(m.repo_id, *pr), PrLock::Locked(milestone_id));
+                }
+                self.milestone_mut(milestone_id).state = was;
+                emit("refund_failed", json!({ "milestone_id": milestone_id }));
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- views
 
     pub fn get_milestone(&self, milestone_id: u64) -> Option<Milestone> {
         self.milestones.get(&milestone_id).cloned()
     }
 
-    pub fn get_pr_lock(&self, repo_id: u64, pr_number: u64) -> Option<PrLock> {
+    pub fn get_bind_nonce(&self, milestone_id: u64) -> Option<String> {
+        self.milestones.get(&milestone_id).map(|m| bind_nonce(milestone_id, m.created_at_ns))
+    }
+
+    pub fn get_lock(&self, repo_id: u64, pr_number: u64) -> Option<PrLock> {
         self.pr_locks.get(&pr_key(repo_id, pr_number)).copied()
+    }
+
+    pub fn is_pr_used(&self, milestone_id: u64, pr_number: u64) -> bool {
+        self.used_prs.contains(&used_key(milestone_id, pr_number))
     }
 
     pub fn get_config(&self) -> Config {
         Config {
             token: self.token.clone(),
             outlayer: self.outlayer.clone(),
-            checker_project: self.checker_project.clone(),
-            checker_version: self.checker_version.clone(),
-            secrets_owner: self.secrets_owner.clone(),
-            secrets_profile: self.secrets_profile.clone(),
+            min_budget: U128(self.min_budget),
+            min_deadline_seconds: self.min_deadline_seconds,
         }
+    }
+
+    pub fn reconcile(&self) -> Reconcile {
+        let credit = self.credit_owners.iter().filter_map(|id| self.milestones.get(id)).map(|m| m.outlayer_credit.0).sum();
+        Reconcile { tokens_held: U128(self.tokens_held), owed: U128(self.owed), outlayer_credit: U128(credit) }
+    }
+}
+
+// ---------------------------------------------------------------- internals
+
+impl Contract {
+    fn milestone(&self, id: u64) -> &Milestone {
+        self.milestones.get(&id).unwrap_or_else(|| env::panic_str("no such milestone"))
+    }
+
+    fn milestone_mut(&mut self, id: u64) -> &mut Milestone {
+        self.milestones.get_mut(&id).unwrap_or_else(|| env::panic_str("no such milestone"))
+    }
+
+    fn refuse_claim(&mut self, milestone_id: u64, pr: u64, back_to: State, reason: &str) {
+        let approved = matches!(back_to, State::Approved { .. });
+        let repo_id = self.milestone(milestone_id).repo_id;
+        // An Approved milestone keeps its PR locked; a Funded one releases it.
+        if !approved {
+            self.pr_locks.remove(&pr_key(repo_id, pr));
+        }
+        self.milestone_mut(milestone_id).state = back_to;
+        emit("claim_refused", json!({ "milestone_id": milestone_id, "pr": pr, "reason": reason, "still_approved": approved }));
+    }
+
+    fn hold(&mut self, milestone_id: u64, pr: u64, head_sha: String, merged: bool, reason: String) {
+        emit("held", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha, "reason": reason }));
+        self.milestone_mut(milestone_id).state = State::Held { pr, head_sha, merged, reason };
+    }
+
+    fn start_payout(&mut self, milestone_id: u64) -> Promise {
+        let m = self.milestone(milestone_id).clone();
+        let pr = match m.state {
+            State::Checking { pr }
+            | State::Reviewing { pr, .. }
+            | State::Held { pr, .. }
+            | State::PayoutFailed { pr } => pr,
+            _ => env::panic_str("cannot pay out from this state"),
+        };
+        let payee = m.payee.clone().unwrap_or_else(|| env::panic_str("payee is not bound")).account;
+        let was = m.state.clone();
+        self.milestone_mut(milestone_id).state = State::PayingOut { pr };
+        emit("payout_started", json!({ "milestone_id": milestone_id, "pr": pr, "to": payee, "amount": m.budget }));
+        self.send(milestone_id, payee, m.budget.0, Transfer::Payout, was)
+    }
+
+    fn send(&self, milestone_id: u64, to: AccountId, amount: u128, kind: Transfer, was: State) -> Promise {
+        ext_ft::ext(self.token.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(FT_TRANSFER_GAS)
+            .ft_transfer(to, U128(amount), Some(format!("proofstream milestone {milestone_id}")))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_TRANSFERRED_GAS)
+                    .on_transferred(milestone_id, U128(amount), kind, was),
+            )
+    }
+
+    /// Ledger 0.3: spend pooled OutLayer credit first. Each owner's credit becomes fee it can
+    /// refund, paid for by the held fee of the milestone now spending it.
+    fn take_credit(&mut self, need: u128) -> Vec<(u64, U128)> {
+        let mut taken = Vec::new();
+        let mut left = need;
+        let mut i = 0;
+        while left > 0 && i < self.credit_owners.len() {
+            let owner = self.credit_owners[i];
+            let m = self.milestone_mut(owner);
+            let take = m.outlayer_credit.0.min(left);
+            m.outlayer_credit = U128(m.outlayer_credit.0 - take);
+            m.fee_refundable = U128(m.fee_refundable.0 + take);
+            left -= take;
+            taken.push((owner, U128(take)));
+            if self.milestone(owner).outlayer_credit.0 == 0 {
+                self.credit_owners.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        taken
+    }
+
+    fn restore_credit(&mut self, taken: &[(u64, U128)]) {
+        for (owner, amount) in taken {
+            let m = self.milestone_mut(*owner);
+            m.outlayer_credit = U128(m.outlayer_credit.0 + amount.0);
+            m.fee_refundable = U128(m.fee_refundable.0 - amount.0);
+            if !self.credit_owners.contains(owner) {
+                self.credit_owners.push(*owner);
+            }
+        }
+    }
+
+    /// The fee went back to the OutLayer balance: it's no longer in the contract, and this
+    /// milestone owns it as credit until another review spends it.
+    fn add_credit(&mut self, milestone_id: u64, amount: u128) {
+        let m = self.milestone_mut(milestone_id);
+        m.outlayer_credit = U128(m.outlayer_credit.0 + amount);
+        if !self.credit_owners.contains(&milestone_id) {
+            self.credit_owners.push(milestone_id);
+        }
+        emit("fee_credited", json!({ "milestone_id": milestone_id, "amount": U128(amount) }));
     }
 }
 
