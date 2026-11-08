@@ -311,3 +311,11 @@ fn utc_parsing_is_exact() {
     assert_eq!(parse_utc_seconds("2026-13-06T12:00:00Z"), None);
     assert_eq!(parse_utc_seconds("2026-11-06T12:00:00+01:00"), None);
 }
+
+#[test]
+fn ai_pins_must_differ_in_owner_and_project() {
+    assert!(independent_ai_pins("a.testnet/proofstream-judge", "b.testnet/proofstream-verifier"));
+    assert!(!independent_ai_pins("a.testnet/proofstream-judge", "a.testnet/proofstream-verifier"));
+    assert!(!independent_ai_pins("a.testnet/proofstream-judge", "a.testnet/proofstream-judge"));
+    assert!(!independent_ai_pins("a.testnet/proofstream-judge", "no-owner"));
+}

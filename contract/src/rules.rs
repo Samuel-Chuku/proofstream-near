@@ -333,6 +333,15 @@ pub fn project_owner(project_id: &str) -> Option<&str> {
     (ok && owner.parse::<AccountId>().is_ok()).then_some(owner)
 }
 
+/// D37: the two AIs share one build, so their independence is the project and the owner
+/// (whose secrets row, API key and verifier fee are separate). Both must differ.
+pub fn independent_ai_pins(judge_project: &str, verifier_project: &str) -> bool {
+    match (project_owner(judge_project), project_owner(verifier_project)) {
+        (Some(judge_owner), Some(verifier_owner)) => judge_project != verifier_project && judge_owner != verifier_owner,
+        _ => false,
+    }
+}
+
 /// Parses GitHub's `YYYY-MM-DDTHH:MM:SSZ` only. Anything else is `None`, which refuses.
 pub fn parse_utc_seconds(s: &str) -> Option<u64> {
     let b = s.as_bytes();

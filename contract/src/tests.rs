@@ -257,6 +257,34 @@ fn create_refuses_a_project_without_an_owner() {
 }
 
 #[test]
+#[should_panic(expected = "judge and verifier pins must have different owners and projects")]
+fn create_refuses_judge_and_verifier_with_one_owner() {
+    let mut c = new_contract();
+    let mut p = params();
+    // Different project names, same owner: one account's key and secrets would serve both.
+    p.pins.verifier.project_id = "owner.testnet/proofstream-verifier".into();
+    create(&mut c, p);
+}
+
+#[test]
+#[should_panic(expected = "judge and verifier pins must have different owners and projects")]
+fn create_refuses_judge_and_verifier_on_one_project() {
+    let mut c = new_contract();
+    let mut p = params();
+    p.pins.verifier.project_id = p.pins.judge.project_id.clone();
+    create(&mut c, p);
+}
+
+#[test]
+fn create_accepts_one_build_for_both_ais_under_different_owners() {
+    // D37: the same wasm hash is fine; independence is the owner and the project.
+    let mut c = new_contract();
+    let p = params();
+    assert_eq!(p.pins.judge.wasm_hash, p.pins.verifier.wasm_hash);
+    create(&mut c, p);
+}
+
+#[test]
 #[should_panic(expected = "diff_cap_bytes out of range")]
 fn create_refuses_a_diff_cap_the_judge_cannot_review() {
     let mut c = new_contract();
@@ -668,21 +696,46 @@ fn the_ai_input_carries_the_prs_file_count() {
     let id = passed(&mut c, true);
     review(&mut c, id);
     fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
-    let inputs: Vec<Value> = near_sdk::test_utils::get_created_receipts()
+    let calls = ai_calls();
+    assert_eq!(calls.len(), 2, "judge and verifier");
+    for call in &calls {
+        let input: Value = near_sdk::serde_json::from_str(call["input_data"].as_str().unwrap()).unwrap();
+        assert_eq!((input["changed_files"].clone(), input["head_sha"].clone()), (json!(3), json!(HEAD)));
+    }
+}
+
+/// The `request_execution` calls the last callback created, as JSON.
+fn ai_calls() -> Vec<Value> {
+    near_sdk::test_utils::get_created_receipts()
         .iter()
         .flat_map(|r| r.actions.iter())
         .filter_map(|a| match a {
             near_sdk::mock::MockAction::FunctionCallWeight { method_name, args, .. }
                 if method_name == b"request_execution" =>
             {
-                let call: Value = near_sdk::serde_json::from_slice(args).ok()?;
-                near_sdk::serde_json::from_str(call["input_data"].as_str()?).ok()
+                near_sdk::serde_json::from_slice(args).ok()
             }
             _ => None,
         })
-        .collect();
-    assert_eq!(inputs.len(), 2, "judge and verifier");
-    assert!(inputs.iter().all(|i| i["changed_files"] == 3 && i["head_sha"] == HEAD));
+        .collect()
+}
+
+#[test]
+fn each_ai_call_opens_the_secrets_of_its_own_pins_owner() {
+    // D37 condition 1: the secrets row comes from the pin's project_id, never another field.
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review(&mut c, id);
+    fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
+    let calls = ai_calls();
+    let pins = params().pins;
+    let expected = [(pins.judge.project_id, "owner.testnet"), (pins.verifier.project_id, "verifier-owner.testnet")];
+    assert_eq!(calls.len(), expected.len());
+    for (call, (project, owner)) in calls.iter().zip(expected) {
+        assert_eq!(call["source"]["Project"]["project_id"], project);
+        assert_eq!(call["secrets_ref"]["account_id"], owner);
+        assert_eq!(call["secrets_ref"]["profile"], "default");
+    }
 }
 
 #[test]

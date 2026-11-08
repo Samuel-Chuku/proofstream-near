@@ -363,6 +363,10 @@ impl Contract {
                 && pins.verifier.fee.0 > 0,
             "bad pins"
         );
+        require!(
+            rules::independent_ai_pins(&pins.judge.project_id, &pins.verifier.project_id),
+            "judge and verifier pins must have different owners and projects"
+        );
 
         let before = env::storage_usage();
         let id = self.next_id;
