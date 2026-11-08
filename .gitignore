@@ -4,3 +4,6 @@ target/
 node_modules/
 dist/
 *.wasm
+
+# relayer signing key (Compose secret)
+relayer/secrets/

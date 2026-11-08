@@ -1,0 +1,7 @@
+# Local run before the VPS: the same relayer container, published on 127.0.0.1 only, no proxy.
+#   docker compose -f compose.yaml -f compose.local.yaml up --build relayer
+services:
+  relayer:
+    environment:
+      TRUST_PROXY: "0"
+    ports: ["127.0.0.1:8080:8080"]
