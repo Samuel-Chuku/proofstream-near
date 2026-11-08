@@ -319,3 +319,18 @@ fn ai_pins_must_differ_in_owner_and_project() {
     assert!(!independent_ai_pins("a.testnet/proofstream-judge", "a.testnet/proofstream-judge"));
     assert!(!independent_ai_pins("a.testnet/proofstream-judge", "no-owner"));
 }
+
+/// The binder's real output (wasmtime run on gist 6b88fc75…, 2026-11-08), byte for byte.
+#[test]
+fn the_real_binder_output_binds_with_its_revision() {
+    let out = br#"{"account":"proofstream-verifier-owner.testnet","contract":"proofstream-contract.testnet","gist_id":"6b88fc7550b9531574c65848a2957244","milestone_id":9,"nonce":"14b1dd926fa2b75574159f00114347ba","owner_id":34985055,"revision":"3276fe4fc9d44d52c95c34cb06d98de02c4953f3"}"#;
+    let b = evaluate_binding(out, "proofstream-contract.testnet", 9, "14b1dd926fa2b75574159f00114347ba", 34_985_055).unwrap();
+    assert_eq!(b.account.as_str(), "proofstream-verifier-owner.testnet");
+    assert_eq!(b.revision, "3276fe4fc9d44d52c95c34cb06d98de02c4953f3");
+}
+
+#[test]
+fn the_old_binder_output_without_a_revision_is_refused() {
+    let old = br#"{"account":"a.testnet","contract":"c.testnet","gist_id":"6b","gist_version":"3276fe4fc9d44d52c95c34cb06d98de02c4953f3","milestone_id":9,"nonce":"n","owner_id":1}"#;
+    assert_eq!(evaluate_binding(old, "c.testnet", 9, "n", 1), Err(Refusal::UnreadableOutput));
+}

@@ -301,6 +301,19 @@ async fn binding_a_named_account_that_does_not_exist_is_refused() {
     assert_eq!(m["binding_in_flight"], false);
 }
 
+#[tokio::test]
+async fn binding_an_implicit_account_creates_it_before_binding() {
+    let env = setup().await;
+    let id = create(&env).await;
+    let implicit = "7e57".repeat(16);
+    let r = ok(bind_to(&env, id, &implicit).await, "bind");
+    assert!(logged(&r, "payee_bound"), "{:?}", r.logs());
+    let account: near_workspaces::AccountId = implicit.parse().unwrap();
+    let details = env.worker.view_account(&account).await.unwrap();
+    assert_eq!(details.balance, NearToken::from_millinear(50), "D29: the probe created it with 0.05 NEAR");
+    assert_eq!(milestone(&env, id).await["payee"]["account"], implicit);
+}
+
 // ---------------------------------------------------------------- the happy path
 
 #[tokio::test]
