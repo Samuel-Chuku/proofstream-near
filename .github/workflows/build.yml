@@ -1,0 +1,124 @@
+# Reproducible builds (D24): every enclave project through OutLayer's own build script and
+# pinned compiler image, and the contract through cargo-near's pinned image. Each one is
+# built twice from scratch and must match. The output is builds.json, the hashes that the
+# milestone pins, the OutLayer secrets and the deployed contract are checked against.
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # OutLayer's scripts/build_github_wasm.sh, read in full, pinned by commit and by hash.
+  OUTLAYER_COMMIT: 9dc70c10453e642233416ba38e16e3b35664be18
+  OUTLAYER_SCRIPT_SHA256: b9d82b1e7343e018eb7b758d05435e2609eb9f6efc9790e9ee9e1f47874a830c
+  CARGO_NEAR_VERSION: 0.23.0
+  CARGO_NEAR_SHA256: 94008b827a457750257eced4b571c33736062cc3bd1ffda3e7af70e2bc9a4073
+
+jobs:
+  enclave:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [checker, binder, ai-review]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fetch OutLayer's build script
+        run: |
+          curl -fsSL -o build_github_wasm.sh \
+            "https://raw.githubusercontent.com/out-layer/outlayer/${OUTLAYER_COMMIT}/scripts/build_github_wasm.sh"
+          echo "${OUTLAYER_SCRIPT_SHA256}  build_github_wasm.sh" | sha256sum -c -
+          chmod +x build_github_wasm.sh
+      - name: Build twice and compare
+        run: |
+          set -o pipefail
+          ./build_github_wasm.sh --dir "outlayer/${{ matrix.project }}" --target wasm32-wasip2 --twice --keep \
+            > hash.txt 2> >(tee build.log >&2)
+          hash=$(tail -1 hash.txt)
+          wasm=$(sed -n 's/^wasm kept at: //p' build.log)
+          image=$(sed -n 's/^compiler image: \([^ ]*\).*/\1/p' build.log)
+          echo "$hash  $wasm" | sha256sum -c -
+          mkdir -p out
+          cp "$wasm" "out/${{ matrix.project }}.wasm"
+          jq -n --arg project "${{ matrix.project }}" --arg commit "$GITHUB_SHA" --arg image "$image" \
+            --arg sha256 "$hash" --arg builder "out-layer/outlayer@${OUTLAYER_COMMIT}:scripts/build_github_wasm.sh" \
+            '{project: $project, commit: $commit, image: $image, builder: $builder, target: "wasm32-wasip2", sha256: $sha256}' \
+            > "out/${{ matrix.project }}.json"
+          cat "out/${{ matrix.project }}.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.project }}
+          path: out/
+
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install cargo-near
+        run: |
+          tarball="cargo-near-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/near/cargo-near/releases/download/cargo-near-v${CARGO_NEAR_VERSION}/${tarball}"
+          echo "${CARGO_NEAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball"
+          install -m 0755 "$(find . -name cargo-near -type f | head -1)" "$HOME/.cargo/bin/cargo-near"
+          cargo near --version
+      - name: Build twice and compare
+        run: |
+          for run in a b; do
+            cargo near build reproducible-wasm --manifest-path contract/Cargo.toml --out-dir "build-$run"
+          done
+          a=$(sha256sum build-a/proofstream_milestones.wasm | cut -d' ' -f1)
+          b=$(sha256sum build-b/proofstream_milestones.wasm | cut -d' ' -f1)
+          [ "$a" = "$b" ] || { echo "NOT reproducible: $a vs $b"; exit 1; }
+          echo "reproducible: both builds produced $a"
+          mkdir -p out
+          cp build-a/proofstream_milestones.wasm out/contract.wasm
+          # NEAR reports a contract's code_hash as the base58 of this sha256.
+          code_hash=$(python3 -I -c 'import hashlib,sys
+          d=hashlib.sha256(open(sys.argv[1],"rb").read()).digest()
+          a="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+          n=int.from_bytes(d,"big"); s=""
+          while n: n,r=divmod(n,58); s=a[r]+s
+          print("1"*(len(d)-len(d.lstrip(b"\0")))+s)' out/contract.wasm)
+          image=$(sed -n 's/^image = "\(.*\)"/\1/p' contract/Cargo.toml)
+          digest=$(sed -n 's/^image_digest = "\(.*\)"/\1/p' contract/Cargo.toml)
+          jq -n --arg commit "$GITHUB_SHA" --arg image "${image%%:*}@${digest}" --arg sha256 "$a" --arg code_hash "$code_hash" \
+            --arg builder "cargo-near ${CARGO_NEAR_VERSION} build reproducible-wasm" \
+            '{project: "contract", commit: $commit, image: $image, builder: $builder, target: "wasm32-unknown-unknown", sha256: $sha256, code_hash: $code_hash}' \
+            > out/contract.json
+          cat out/contract.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-contract
+          path: out/
+
+  builds-json:
+    needs: [enclave, contract]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: out
+      - name: Assemble builds.json
+        run: |
+          jq -s 'sort_by(.project)' out/*.json > builds.json
+          cat builds.json
+          {
+            echo '| project | sha256 |'
+            echo '|---|---|'
+            jq -r '.[] | "| \(.project) | `\(.sha256)` |"' builds.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: builds-json
+          path: builds.json
