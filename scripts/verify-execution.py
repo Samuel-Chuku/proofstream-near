@@ -17,10 +17,12 @@ For every execution the transaction requested, it prints one PASS/FAIL line per 
   callback       the resume came from a resolve_execution tx signed by worker.outlayer.testnet
                  with a function-call key scoped to outlayer.testnet (a key the register
                  contract adds only after checking that worker's own TDX quote)
-  intel-chain    the quote's signature chain, via dcap-qvl if it is installed; SKIP otherwise
+  intel-chain    the quote is signed by a genuine Intel TDX platform whose TCB is UpToDate,
+                 via dcap-qvl with Intel's own collateral; SKIP if dcap-qvl isn't installed
 
 Standard library only. Reads public endpoints: NEAR archival RPC, the OutLayer API and
-NearBlocks (only to look up a tx's signer when --sender is not given). Exit code 0 only
+NearBlocks (only to look up a tx's signer when --sender is not given), and Intel's PCS
+through dcap-qvl. Exit code 0 only
 if every check passes.
 """
 
@@ -29,6 +31,7 @@ import base64
 import bisect
 import hashlib
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -42,6 +45,7 @@ import urllib.request
 RPCS = ["https://archival-rpc.testnet.near.org", "https://archival-rpc.testnet.fastnear.com"]
 OUTLAYER_API = "https://testnet-api.outlayer.ai"
 NEARBLOCKS = "https://api-testnet.nearblocks.io/v3"
+INTEL_PCS = "https://api.trustedservices.intel.com"
 OUTLAYER = "outlayer.testnet"
 REGISTER = "worker.outlayer.testnet"
 USER_AGENT = "proofstream-verify-execution/1"
@@ -177,12 +181,19 @@ def intel_chain(request_id, quote):
     if not tool:
         report(request_id, "intel-chain", None, "dcap-qvl not installed (cargo install dcap-qvl-cli --version 0.7.1)")
         return
+    # Collateral (certs, CRLs, TCB info) straight from Intel unless PCCS_URL says otherwise;
+    # dcap-qvl's own default is a third-party mirror.
+    env = {**os.environ, "PCCS_URL": os.environ.get("PCCS_URL") or INTEL_PCS}
     with tempfile.NamedTemporaryFile(suffix=".bin") as f:
         f.write(quote)
         f.flush()
-        p = subprocess.run([tool, "verify", f.name], capture_output=True, text=True, timeout=120)
-    out = (p.stdout + p.stderr).strip().splitlines()
-    report(request_id, "intel-chain", p.returncode == 0, out[-1][:160] if out else f"exit {p.returncode}")
+        p = subprocess.run([tool, "verify", f.name], capture_output=True, text=True, timeout=120, env=env)
+    if p.returncode != 0:
+        out = (p.stdout + p.stderr).strip().splitlines()
+        report(request_id, "intel-chain", False, out[-1][:160] if out else f"exit {p.returncode}")
+        return
+    status = next((json.loads(l).get("status") for l in p.stdout.splitlines() if l.startswith("{")), None)
+    report(request_id, "intel-chain", status == "UpToDate", f"signed by Intel, TCB {status} (collateral: {env['PCCS_URL']})")
 
 
 def verify_request(request_id, request, delivered, callback_block, builds):
