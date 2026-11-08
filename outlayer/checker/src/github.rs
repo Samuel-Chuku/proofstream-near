@@ -4,7 +4,7 @@ use crate::rules::{self, Account, App, ChangedFile, CheckRun, Checks, CiSource, 
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
-use wasi_http_client::Client;
+use wasi_http_client::{Client, Response};
 
 const API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
@@ -15,6 +15,7 @@ const PER_PAGE: usize = 100;
 const MAX_FILE_PAGES: usize = 30;
 const MAX_CHECK_PAGES: usize = 10;
 const MAX_REVIEW_PAGES: usize = 10;
+const DIFF_CHUNK_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize)]
 struct Input {
@@ -92,18 +93,22 @@ struct CheckRunsPage {
 }
 
 fn get(token: &str, path: &str) -> Result<(u16, Vec<u8>), &'static str> {
-    let response = Client::new()
+    let response = send(token, path, "application/vnd.github+json")?;
+    let status = response.status();
+    let body = response.body().map_err(|_| "github_bad_body")?;
+    Ok((status, body))
+}
+
+fn send(token: &str, path: &str, accept: &str) -> Result<Response, &'static str> {
+    Client::new()
         .get(&format!("{API}{path}"))
         .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", accept.to_string())
         .header("X-GitHub-Api-Version", API_VERSION)
         .header("User-Agent", USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .send()
-        .map_err(|_| "github_unreachable")?;
-    let status = response.status();
-    let body = response.body().map_err(|_| "github_bad_body")?;
-    Ok((status, body))
+        .map_err(|_| "github_unreachable")
 }
 
 fn get_ok(token: &str, path: &str) -> Result<Vec<u8>, &'static str> {
@@ -131,6 +136,31 @@ fn pr_files(token: &str, base: &str, pr: u64) -> Result<(u64, bool), &'static st
         }
     }
     Ok((listed, touches))
+}
+
+/// The size of the exact diff the judge and verifier will fetch (`compare`, base...head,
+/// as a raw diff), so the contract can refuse an oversized one before any fee (D33).
+/// Reading stops past the judge's own limit, so a huge diff costs at most that much.
+/// GitHub answers 406 when a diff is too big for it to render.
+fn diff_size(token: &str, base: &str, base_sha: &str, head_sha: &str) -> Result<(u64, bool), &'static str> {
+    let path = format!("{base}/compare/{base_sha}...{head_sha}");
+    let response = send(token, &path, "application/vnd.github.diff")?;
+    match response.status() {
+        200 => {}
+        406 => return Ok((0, true)),
+        401 => return Err("github_bad_token"),
+        403 | 429 => return Err("github_forbidden_or_rate_limited"),
+        404 => return Err("github_not_found"),
+        _ => return Err("github_unexpected_status"),
+    }
+    let mut total = 0u64;
+    while let Some(chunk) = response.chunk(DIFF_CHUNK_BYTES).map_err(|_| "github_bad_body")? {
+        total += chunk.len() as u64;
+        if rules::diff_over_limit(total) {
+            return Ok((total, true));
+        }
+    }
+    Ok((total, false))
 }
 
 /// Every review on the PR, oldest first, as GitHub lists them.
@@ -241,6 +271,12 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
     let files_complete = rules::file_list_complete(listed, pull.changed_files);
     let independent_approval =
         rules::independent_approval(&reviews(&token, &base, input.pr_number)?, pull.user.id, &pull.head.sha);
+    // An incomplete PR is refused before its diff matters, so don't fetch it.
+    let (diff_bytes, diff_too_large) = if files_complete {
+        diff_size(&token, &base, &pull.base.sha, &pull.head.sha)?
+    } else {
+        (0, true)
+    };
     let private = pull.base.repo.private;
     let ci_source = if private { CiSource::ActionsJobs } else { CiSource::CheckRuns };
     let read_ci = |sha: &str| {
@@ -285,6 +321,8 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
         changed_files: pull.changed_files,
         files_complete,
         touches_github: rules::reported_touches_github(seen_touch, files_complete),
+        diff_bytes,
+        diff_too_large,
         merged_at: pull.merged_at,
     })
     .map_err(|_| "encode_failed")

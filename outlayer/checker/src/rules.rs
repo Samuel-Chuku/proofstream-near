@@ -10,6 +10,14 @@ const MAX_OWNER_LEN: usize = 39;
 const MAX_REPO_LEN: usize = 100;
 /// GitHub's PR files API returns at most this many files.
 pub const MAX_PR_FILES: u64 = 3000;
+/// The judge's own `MAX_DIFF_BYTES`. A diff past this can never be reviewed, so the
+/// checker stops reading there.
+const MAX_REVIEWABLE_DIFF_BYTES: u64 = 180_000;
+
+/// True once a diff has grown past anything the AIs could review.
+pub fn diff_over_limit(bytes_so_far: u64) -> bool {
+    bytes_so_far > MAX_REVIEWABLE_DIFF_BYTES
+}
 /// GitHub's account `type` for a person. Bots and organizations never count as review.
 const HUMAN: &str = "User";
 
@@ -93,6 +101,9 @@ pub struct Output {
     pub files_complete: bool,
     pub touches_github: bool,
     pub merged_at: Option<String>,
+    /// Bytes of the compare diff the AIs will read; `diff_too_large` when GitHub won't render it.
+    pub diff_bytes: u64,
+    pub diff_too_large: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -462,6 +473,12 @@ mod tests {
     }
 
     #[test]
+    fn diff_reading_stops_just_past_the_judges_limit() {
+        assert!(!diff_over_limit(MAX_REVIEWABLE_DIFF_BYTES));
+        assert!(diff_over_limit(MAX_REVIEWABLE_DIFF_BYTES + 1));
+    }
+
+    #[test]
     fn largest_output_fits_outlayers_limit() {
         let sha = "f".repeat(40);
         let out = Output {
@@ -484,6 +501,8 @@ mod tests {
             files_complete: false,
             touches_github: false,
             merged_at: Some("2026-11-06T12:00:00Z".into()),
+            diff_bytes: u64::MAX,
+            diff_too_large: false,
         };
         let len = serde_json::to_string(&out).unwrap().len();
         assert!(len <= 900, "output is {len} bytes");
