@@ -398,3 +398,20 @@ fn the_old_binder_output_without_a_revision_is_refused() {
     let old = br#"{"account":"a.testnet","contract":"c.testnet","gist_id":"6b","gist_version":"3276fe4fc9d44d52c95c34cb06d98de02c4953f3","milestone_id":9,"nonce":"n","owner_id":1}"#;
     assert_eq!(evaluate_binding(old, "c.testnet", 9, "n", 1), Err(Refusal::UnreadableOutput));
 }
+
+#[test]
+fn the_signed_message_matches_the_one_the_verifier_composes() {
+    // Same vector as outlayer/ai-review's `the_signed_message_is_fixed_by_review_commit_verdict_and_caller`.
+    assert_eq!(
+        verdict_message("proofstream-v1.testnet", 7, 2, &"a".repeat(40), "partial", 60, "proofstream-checker-owner.testnet"),
+        "proofstream-verdict:v1:proofstream-v1.testnet:7:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:partial:60:proofstream-checker-owner.testnet"
+    );
+}
+
+#[test]
+fn hex_keys_and_signatures_must_be_exact_lowercase_hex() {
+    assert_eq!(hex_array::<2>("0aff"), Some([0x0a, 0xff]));
+    for bad in ["0AFF", "0af", "0aff00", "zz00", ""] {
+        assert_eq!(hex_array::<2>(bad), None, "{bad}");
+    }
+}

@@ -84,6 +84,7 @@ fn params() -> CreateMilestone {
                 project_id: "verifier-owner.testnet/verifier".into(),
                 wasm_hash: HASH.into(),
                 fee: U128(FEE),
+                public_key: VERIFIER_KEY.into(),
             },
         },
     }
@@ -187,9 +188,65 @@ fn verifier_ai(verdict: &str, head: &str) -> Value {
     ai("verifier", verdict, head)
 }
 
+/// D48: the verifier's test key (tests/fixtures/sign-verifier.mjs, a public test seed).
+const VERIFIER_KEY: &str = "f5c3e2136054b44445215634ef19540c9cae7d22199d2b6595d12063dca403fe";
+/// The judge pin's owner, who pays for the verifier's run.
+const JUDGE_OWNER: &str = "owner.testnet";
+const SIGS: &str = include_str!("../tests/fixtures/verifier-sigs.json");
+
+/// A real ed25519 signature by the test key, from the fixture. A message not there yet is
+/// written down for `node tests/fixtures/sign-verifier.mjs` to sign.
+fn sig_for(message: &str) -> String {
+    let fixture: Value = serde_json::from_str(SIGS).unwrap();
+    if let Some(sig) = fixture["sigs"][message].as_str() {
+        return sig.into();
+    }
+    use std::io::Write;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/missing-verifier-sigs.txt");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+    writeln!(f, "{message}").unwrap();
+    panic!("no test signature for {message}: run `node tests/fixtures/sign-verifier.mjs`");
+}
+
+/// The verifier's claim as its enclave would sign it, for this review.
+fn signed_claim(id: u64, attempt: u32, head: &str, verdict: &str, pct: u64) -> Value {
+    let pct8 = u8::try_from(pct).unwrap_or(255);
+    let message = rules::verdict_message("contract.testnet", id, attempt, head, verdict, pct8, JUDGE_OWNER);
+    json!({ "verdict": verdict, "percent_done": pct, "caller": JUDGE_OWNER, "signature": sig_for(&message), "call_id": "call-1" })
+}
+
+/// What the judge's run returns: its own answer, carrying the verifier's signed claim
+/// when the verifier gave one (D48). The two test answers keep their old meaning.
+fn judge_result(c: &Contract, id: u64, judge: PromiseResult, verifier: PromiseResult) -> PromiseResult {
+    let PromiseResult::Successful(bytes) = &judge else { return judge };
+    let Ok(mut out) = serde_json::from_slice::<Value>(bytes) else { return judge };
+    if !out.is_object() {
+        return judge;
+    }
+    let attempt = c.get_milestone(id).unwrap().paid_attempts_used;
+    let v = match &verifier {
+        PromiseResult::Successful(b) => serde_json::from_slice::<Value>(b).unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    let block = match (v["role"].as_str(), v["status"].as_str()) {
+        (Some("verifier"), Some("verified")) if v["verdict"].is_string() => {
+            signed_claim(id, attempt, v["head_sha"].as_str().unwrap(), v["verdict"].as_str().unwrap(), v["percent_done"].as_u64().unwrap_or(0))
+        }
+        (Some("verifier"), Some(early @ ("too_large" | "incomplete_diff"))) => signed_claim(id, attempt, v["head_sha"].as_str().unwrap(), early, 0),
+        // Another role's answer can't carry the verifier's signature.
+        (Some(_), Some("verified")) => {
+            json!({ "verdict": v["verdict"], "percent_done": 100, "caller": JUDGE_OWNER, "signature": "00".repeat(64), "call_id": "call-1" })
+        }
+        _ => json!({ "error": "verifier_not_completed" }),
+    };
+    out["verifier"] = block;
+    ok(&out)
+}
+
 fn reviewed(c: &mut Contract, id: u64, judge: PromiseResult, verifier: PromiseResult) {
-    set_callback(vec![judge, verifier]);
-    c.on_reviewed(id, acc("anyone.testnet"), MIN_AI_DEPOSIT, MIN_AI_DEPOSIT);
+    let result = judge_result(c, id, judge, verifier);
+    set_callback(vec![result]);
+    c.on_reviewed(id, acc("anyone.testnet"), MIN_AI_DEPOSIT.saturating_mul(2));
 }
 
 /// Through review with both answers given, the fee deposited fresh.
@@ -702,11 +759,25 @@ fn the_ai_input_carries_the_prs_file_count() {
     review(&mut c, id);
     fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
     let calls = ai_calls();
-    assert_eq!(calls.len(), 2, "judge and verifier");
-    for call in &calls {
-        let input: Value = near_sdk::serde_json::from_str(call["input_data"].as_str().unwrap()).unwrap();
-        assert_eq!((input["changed_files"].clone(), input["head_sha"].clone()), (json!(3), json!(HEAD)));
-    }
+    assert_eq!(calls.len(), 1, "D48: one run, the judge's; it asks the verifier itself");
+    let input: Value = near_sdk::serde_json::from_str(calls[0]["input_data"].as_str().unwrap()).unwrap();
+    assert_eq!((input["changed_files"].clone(), input["head_sha"].clone()), (json!(3), json!(HEAD)));
+}
+
+#[test]
+fn the_judge_is_told_which_review_this_is_and_which_verifier_build_to_pay() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review(&mut c, id);
+    fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
+    let call = &ai_calls()[0];
+    let input: Value = near_sdk::serde_json::from_str(call["input_data"].as_str().unwrap()).unwrap();
+    assert_eq!(input["review"], json!({ "contract": "contract.testnet", "milestone_id": id, "attempt": 1 }));
+    let pins = params().pins;
+    assert_eq!(input["verifier"], json!({ "project_id": pins.verifier.project_id, "version_key": HASH, "fee": FEE }));
+    // The judge's owner is paid the fee, to pass on to the verifier.
+    assert_eq!(call["params"]["attached_usd"], FEE.to_string());
+    assert_eq!(call["source"]["Project"]["project_id"], pins.judge.project_id);
 }
 
 /// The `request_execution` calls the last callback created, as JSON.
@@ -734,7 +805,8 @@ fn each_ai_call_opens_the_secrets_of_its_own_pins_owner() {
     fee_ready(&mut c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
     let calls = ai_calls();
     let pins = params().pins;
-    let expected = [(pins.judge.project_id, "owner.testnet"), (pins.verifier.project_id, "verifier-owner.testnet")];
+    // D48: only the judge runs on chain; the verifier's row is opened by the judge's call.
+    let expected = [(pins.judge.project_id, "owner.testnet")];
     assert_eq!(calls.len(), expected.len());
     for (call, (project, owner)) in calls.iter().zip(expected) {
         assert_eq!(call["source"]["Project"]["project_id"], project);
@@ -774,10 +846,10 @@ fn a_failed_run_retries_until_attempts_run_out() {
 }
 
 #[test]
-fn a_failed_verifier_run_records_its_fee_as_credit() {
+fn a_failed_judge_run_records_its_fee_as_credit() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
-    full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&Value::Null));
+    full_review(&mut c, id, ok(&Value::Null), ok(&verifier_ai("meets", HEAD)));
     let m = c.get_milestone(id).unwrap();
     assert_eq!(m.outlayer_credit, U128(FEE));
     assert_eq!(c.reconcile().outlayer_credit, U128(FEE));
@@ -788,7 +860,7 @@ fn a_failed_verifier_run_records_its_fee_as_credit() {
 fn the_next_review_spends_credit_before_new_money() {
     let mut c = new_contract();
     let a = passed(&mut c, true);
-    full_review(&mut c, a, ok(&judge_ai("meets", HEAD)), ok(&Value::Null));
+    full_review(&mut c, a, ok(&Value::Null), ok(&verifier_ai("meets", HEAD)));
     // A second milestone's review spends A's credit, and A can refund that much.
     let b = ready(&mut c);
     claim(&mut c, b, PR + 1);
@@ -1114,7 +1186,7 @@ fn the_ais_see_every_earlier_paid_part() {
     let mut c = new_contract();
     let id = paid_partial(&mut c, 60, 60);
     let m = c.get_milestone(id).unwrap();
-    let input = ai_input(&m, BASE, NEW_HEAD, 3);
+    let input = ai_input(&m, (id, 1), BASE, NEW_HEAD, 3);
     assert_eq!(input["certified_pct"], 60);
     assert_eq!(input["prior"], json!([{ "base_sha": BASE, "head_sha": HEAD }]));
 }
@@ -1261,4 +1333,115 @@ fn review_attempts_default_to_10_and_go_up_to_25() {
 fn more_than_25_review_attempts_are_refused() {
     let mut c = new_contract();
     create(&mut c, CreateMilestone { max_paid_attempts: Some(26), ..params() });
+}
+
+
+// ---------------------------------------------------------------- D48: the signed second opinion
+
+fn judge_out(head: &str, verifier: Value) -> Value {
+    let mut out = ai_pct("judge", "meets", head, 100);
+    out["verifier"] = verifier;
+    out
+}
+
+fn review_with(c: &mut Contract, id: u64, judge: Value) {
+    review(c, id);
+    fee_ready(c, id, vec![], FEE, Some(ok(&json!(FEE.to_string()))));
+    set_callback(vec![ok(&judge)]);
+    c.on_reviewed(id, acc("anyone.testnet"), MIN_AI_DEPOSIT.saturating_mul(2));
+}
+
+#[test]
+fn a_correctly_signed_verifier_verdict_counts() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review_with(&mut c, id, judge_out(HEAD, signed_claim(id, 1, HEAD, "meets", 100)));
+    assert!(matches!(state(&c, id), State::PayingOut { .. }), "{:?}", state(&c, id));
+}
+
+#[test]
+fn a_verdict_the_judge_changed_is_no_verdict() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    // Signed as partial 60, passed on as meets 100.
+    let mut forged = signed_claim(id, 1, HEAD, "partial", 60);
+    forged["verdict"] = json!("meets");
+    forged["percent_done"] = json!(100);
+    review_with(&mut c, id, judge_out(HEAD, forged));
+    assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
+    assert!(logged("review_retry"));
+}
+
+fn replayed_is_no_verdict(replayed: fn(u64) -> Value) {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review_with(&mut c, id, judge_out(HEAD, replayed(id)));
+    assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
+}
+
+#[test]
+fn a_signature_from_another_attempt_is_no_verdict() {
+    replayed_is_no_verdict(|id| signed_claim(id, 2, HEAD, "meets", 100));
+}
+
+#[test]
+fn a_signature_from_another_milestone_is_no_verdict() {
+    replayed_is_no_verdict(|id| signed_claim(id + 1, 1, HEAD, "meets", 100));
+}
+
+#[test]
+fn a_signature_for_another_commit_is_no_verdict() {
+    replayed_is_no_verdict(|id| signed_claim(id, 1, NEW_HEAD, "meets", 100));
+}
+
+#[test]
+fn a_verdict_run_by_anyone_but_the_judges_owner_is_no_verdict() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    let mut other = signed_claim(id, 1, HEAD, "meets", 100);
+    other["caller"] = json!("someone-else.testnet");
+    review_with(&mut c, id, judge_out(HEAD, other));
+    assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
+}
+
+#[test]
+fn a_verdict_signed_by_another_key_is_no_verdict() {
+    let mut c = new_contract();
+    let mut p = params();
+    // The real signature, checked against a different pinned key.
+    p.pins.verifier.public_key = "11".repeat(32);
+    let id = create(&mut c, p);
+    fund(&mut c, id);
+    bind(&mut c, id);
+    claim(&mut c, id, PR);
+    checked_json(&mut c, id, checker(true));
+    review_with(&mut c, id, judge_out(HEAD, signed_claim(id, 1, HEAD, "meets", 100)));
+    assert!(matches!(state(&c, id), State::HardFactsPassed { .. }));
+}
+
+#[test]
+fn a_signed_objection_from_the_verifier_holds() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    review_with(&mut c, id, judge_out(HEAD, signed_claim(id, 1, HEAD, "unclear", 0)));
+    assert!(matches!(state(&c, id), State::Held { reason, .. } if reason == "verifier:unclear"));
+}
+
+#[test]
+fn no_second_opinion_means_no_payout() {
+    replayed_is_no_verdict(|_| Value::Null);
+}
+
+#[test]
+fn an_unreachable_verifier_means_no_payout() {
+    replayed_is_no_verdict(|_| json!({ "error": "verifier_not_completed" }));
+}
+
+#[test]
+#[should_panic(expected = "bad pins")]
+fn create_refuses_a_verifier_key_that_is_not_32_bytes_of_hex() {
+    let mut c = new_contract();
+    let mut p = params();
+    p.pins.verifier.public_key = "ed25519:abc".into();
+    create(&mut c, p);
 }

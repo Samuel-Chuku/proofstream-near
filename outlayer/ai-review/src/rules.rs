@@ -72,6 +72,16 @@ const MAX_OWNER_LEN: usize = 39;
 const MAX_REPO_LEN: usize = 100;
 const GIT_SHA_LEN: usize = 40;
 const FILE_HEADER: &str = "diff --git ";
+/// D48: the most the judge will pay the verifier per review, in micro-USD ($0.10). The
+/// contract sets the fee; this cap bounds what the judge's payment key can spend per run.
+pub const MAX_VERIFIER_FEE: u64 = 100_000;
+const MAX_ACCOUNT_LEN: usize = 64;
+const MAX_PROJECT_LEN: usize = 128;
+const SHA256_HEX_LEN: usize = 64;
+const SIGNATURE_HEX_LEN: usize = 128;
+const MAX_CALL_ID_LEN: usize = 64;
+/// Fixed prefix of every message the verifier signs (D48). The contract rebuilds it.
+pub const VERDICT_PREFIX: &str = "proofstream-verdict:v1";
 
 #[derive(Deserialize, Debug)]
 pub struct Input {
@@ -86,6 +96,28 @@ pub struct Input {
     pub certified_pct: u8,
     /// D45: the earlier paid PRs, shown to the model as work already paid for.
     pub prior: Vec<Part>,
+    /// D48: which review this is, signed into the verifier's verdict.
+    pub review: Review,
+    /// D48: the judge only. The verifier version to buy a second opinion from.
+    #[serde(default)]
+    pub verifier: Option<VerifierCall>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Review {
+    pub contract: String,
+    pub milestone_id: u64,
+    pub attempt: u32,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VerifierCall {
+    /// `owner/name` of the verifier's OutLayer project.
+    pub project_id: String,
+    /// The verifier build's wasm sha256, pinned in the milestone.
+    pub version_key: String,
+    /// Micro-USD attached for the verifier's owner, at most `MAX_VERIFIER_FEE`.
+    pub fee: u64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -144,6 +176,43 @@ pub fn valid_input(input: &Input) -> bool {
         && input.certified_pct < FULL
         && input.prior.len() <= MAX_PRIOR_PARTS
         && input.prior.iter().all(|p| is_git_sha(&p.base_sha) && is_git_sha(&p.head_sha))
+        && is_account(&input.review.contract)
+        && input.verifier.as_ref().is_none_or(valid_verifier_call)
+}
+
+/// A NEAR account id's characters, so it can sit between `:` separators in a signed message.
+fn is_account(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_ACCOUNT_LEN
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn valid_verifier_call(v: &VerifierCall) -> bool {
+    let project = v.project_id.split_once('/').is_some_and(|(owner, name)| {
+        is_account(owner) && !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    });
+    project && v.project_id.len() <= MAX_PROJECT_LEN && is_lower_hex(&v.version_key, SHA256_HEX_LEN) && v.fee <= MAX_VERIFIER_FEE
+}
+
+/// D48: the judge must be told whom to ask; the verifier must not be (it asks no one).
+pub fn role_fits_input(cfg: &Config, input: &Input) -> bool {
+    match cfg.role {
+        "judge" => input.verifier.is_some(),
+        _ => input.verifier.is_none(),
+    }
+}
+
+/// D48: what the verifier signs and the contract rebuilds. Every field is either from the
+/// contract-built input, the verifier's own verdict, or the host (`caller`), never free text.
+pub fn verdict_message(review: &Review, head_sha: &str, verdict: &str, percent: u8, caller: &str) -> String {
+    format!(
+        "{VERDICT_PREFIX}:{}:{}:{}:{head_sha}:{verdict}:{percent}:{caller}",
+        review.contract, review.milestone_id, review.attempt
+    )
 }
 
 /// D45: a verdict and its percent must agree, or there is no verdict.
@@ -254,37 +323,74 @@ pub fn chat_id(response: &[u8]) -> Option<String> {
     .then(|| id.to_string())
 }
 
-/// Everything a verified run reports. Only `status`, `head_sha` and `verdict` decide
-/// anything in the contract; the rest is evidence for anyone checking the run.
-pub struct Verified<'a> {
-    pub cfg: &'a Config,
-    pub head_sha: &'a str,
-    pub answer: &'a Answer,
-    pub chat_id: &'a str,
-    pub request_sha256: String,
-    pub response_sha256: String,
-    pub diff_bytes: usize,
-    /// Fetch, model and signature times in milliseconds.
-    pub ms: [u64; 3],
+fn verdict_str(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Meets => "meets",
+        Verdict::Partial => "partial",
+        Verdict::DoesNotMeet => "does_not_meet",
+        Verdict::Unclear => "unclear",
+    }
 }
 
-pub fn verified_output(v: &Verified) -> Value {
+/// What both roles say about their own review. Only `status`, `role`, `head_sha`,
+/// `verdict` and `percent_done` decide anything; `chat_id` lets anyone fetch the model's
+/// signature from NEAR AI and check it again.
+pub fn own_output(cfg: &Config, head_sha: &str, answer: &Answer, chat_id: &str) -> Value {
     json!({
         "status": "verified",
-        "role": v.cfg.role,
-        "head_sha": v.head_sha,
-        "verdict": v.answer.verdict,
-        "percent_done": v.answer.percent_done,
-        "weakened_tests": v.answer.weakened_tests,
-        "reasons": v.answer.reasons,
-        "model": v.cfg.model,
-        "signer": v.cfg.signer,
-        "chat_id": v.chat_id,
-        "request_sha256": v.request_sha256,
-        "response_sha256": v.response_sha256,
-        "diff_bytes": v.diff_bytes,
-        "ms": { "fetch": v.ms[0], "model": v.ms[1], "signature": v.ms[2] },
+        "role": cfg.role,
+        "head_sha": head_sha,
+        "verdict": answer.verdict,
+        "percent_done": answer.percent_done,
+        "weakened_tests": answer.weakened_tests,
+        "reasons": answer.reasons,
+        "chat_id": chat_id,
     })
+}
+
+/// The verifier's verdict as signed: `verdict` is a model verdict or an early status
+/// (`too_large`, `incomplete_diff`), `percent` 0 for those.
+pub fn signed_verdict(answer: Option<&Answer>, early: &str) -> (&'static str, u8) {
+    match answer {
+        Some(a) => (verdict_str(a.verdict), a.percent_done),
+        None if early == "too_large" => ("too_large", 0),
+        None => ("incomplete_diff", 0),
+    }
+}
+
+/// What the judge passes on from the verifier's reply. The signature is the contract's to
+/// check; the judge only keeps the fields it needs, in shape, so a malformed reply becomes
+/// an error code rather than anything the contract could misread.
+pub fn read_verifier_reply(status: u16, body: &[u8], head_sha: &str) -> Value {
+    let fail = |code: &str| json!({ "error": code });
+    if status != 200 {
+        return fail("verifier_http_status");
+    }
+    let Ok(reply) = serde_json::from_slice::<Value>(body) else { return fail("verifier_bad_json") };
+    if reply["status"] != "completed" {
+        return fail("verifier_not_completed");
+    }
+    let out = &reply["output"];
+    let call_id = reply["call_id"].as_str().unwrap_or("");
+    let call_ok = !call_id.is_empty()
+        && call_id.len() <= MAX_CALL_ID_LEN
+        && call_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if out["role"] != "verifier" || out["head_sha"] != head_sha || !call_ok {
+        return fail("verifier_wrong_reply");
+    }
+    let (Some(verdict), Some(percent), Some(caller), Some(signature)) = (
+        out["verdict"].as_str(),
+        out["percent_done"].as_u64(),
+        out["caller"].as_str(),
+        out["signature"].as_str(),
+    ) else {
+        return fail("verifier_unsigned");
+    };
+    let known = matches!(verdict, "meets" | "partial" | "does_not_meet" | "unclear" | "too_large" | "incomplete_diff");
+    if !known || percent > u64::from(FULL) || !is_account(caller) || !is_lower_hex(signature, SIGNATURE_HEX_LEN) {
+        return fail("verifier_unsigned");
+    }
+    json!({ "verdict": verdict, "percent_done": percent, "caller": caller, "signature": signature, "call_id": call_id })
 }
 
 #[cfg(test)]
@@ -304,6 +410,8 @@ mod tests {
             milestone_text: "Add a feature".into(),
             certified_pct: 0,
             prior: vec![],
+            review: Review { contract: "proofstream-v1.testnet".into(), milestone_id: 7, attempt: 2 },
+            verifier: None,
         }
     }
 
@@ -426,50 +534,48 @@ mod tests {
         }
     }
 
-    /// Every field at its largest: the longest role, model and verdict, reasons that are
-    /// worst-case to escape, the longest chat id, and the largest counters.
-    #[test]
-    fn worst_case_output_fits_outlayers_limit() {
-        let worst = Answer {
+    fn worst_answer() -> Answer {
+        Answer {
             verdict: Verdict::DoesNotMeet,
             percent_done: 100,
             weakened_tests: false,
             reasons: vec![clip_reason(&"\"".repeat(500)), clip_reason(&"€".repeat(500))],
-        };
-        for cfg in [&JUDGE, &VERIFIER] {
-            let out = verified_output(&Verified {
-                cfg,
-                head_sha: SHA,
-                answer: &worst,
-                chat_id: &"c".repeat(MAX_CHAT_ID_LEN),
-                request_sha256: "f".repeat(64),
-                response_sha256: "f".repeat(64),
-                diff_bytes: MAX_DIFF_BYTES,
-                ms: [u64::MAX; 3],
-            });
+        }
+    }
+
+    fn worst_verifier_block() -> Value {
+        json!({
+            "verdict": "incomplete_diff", "percent_done": 100, "caller": "a".repeat(MAX_ACCOUNT_LEN),
+            "signature": "f".repeat(SIGNATURE_HEX_LEN), "call_id": "c".repeat(MAX_CALL_ID_LEN),
+        })
+    }
+
+    /// Every field at its largest: the longest role and verdict, reasons that are worst-case
+    /// to escape, the longest chat id, and for the judge the largest verifier block (D48).
+    #[test]
+    fn worst_case_outputs_fit_outlayers_limit() {
+        let chat = "c".repeat(MAX_CHAT_ID_LEN);
+        let mut judge = own_output(&JUDGE, SHA, &worst_answer(), &chat);
+        judge["verifier"] = worst_verifier_block();
+        let mut verifier = own_output(&VERIFIER, SHA, &worst_answer(), &chat);
+        verifier["caller"] = json!("a".repeat(MAX_ACCOUNT_LEN));
+        verifier["signature"] = json!("f".repeat(SIGNATURE_HEX_LEN));
+        verifier["public_key"] = json!("f".repeat(SHA256_HEX_LEN));
+        for (role, out) in [("judge", judge), ("verifier", verifier)] {
             let len = out.to_string().len();
-            assert!(len <= MAX_OUTPUT_BYTES, "{} output is {len} bytes", cfg.role);
+            assert!(len <= MAX_OUTPUT_BYTES, "{role} output is {len} bytes");
         }
     }
 
     #[test]
-    fn verified_output_names_the_role_and_binds_the_commit() {
+    fn own_output_names_the_role_and_binds_the_commit() {
         let a = read_answer(&answer(SHA, "meets"), SHA).unwrap();
-        let out = verified_output(&Verified {
-            cfg: &VERIFIER,
-            head_sha: SHA,
-            answer: &a,
-            chat_id: "chatcmpl-1",
-            request_sha256: String::new(),
-            response_sha256: String::new(),
-            diff_bytes: 1,
-            ms: [0; 3],
-        });
+        let out = own_output(&VERIFIER, SHA, &a, "chatcmpl-1");
         assert_eq!(out["status"], "verified");
         assert_eq!(out["role"], "verifier");
         assert_eq!(out["head_sha"], SHA);
         assert_eq!(out["verdict"], "meets");
-        assert_eq!(out["model"], VERIFIER.model);
+        assert_eq!(out["chat_id"], "chatcmpl-1");
     }
 
     #[test]
@@ -576,18 +682,9 @@ mod tests {
     }
 
     #[test]
-    fn verified_output_carries_the_percent() {
+    fn own_output_carries_the_percent() {
         let a = read_answer(&answer_pct(SHA, "partial", 60), SHA).unwrap();
-        let out = verified_output(&Verified {
-            cfg: &JUDGE,
-            head_sha: SHA,
-            answer: &a,
-            chat_id: "c",
-            request_sha256: String::new(),
-            response_sha256: String::new(),
-            diff_bytes: 1,
-            ms: [0; 3],
-        });
+        let out = own_output(&JUDGE, SHA, &a, "c");
         assert_eq!(out["verdict"], "partial");
         assert_eq!(out["percent_done"], 60);
     }
@@ -598,5 +695,122 @@ mod tests {
         assert!(PROMPT.contains("percent_done"));
         assert!(PROMPT.contains("already_paid_diff"));
         assert!(PROMPT.contains("earns nothing"));
+    }
+
+    fn call() -> VerifierCall {
+        VerifierCall { project_id: "proofstream-verifier-owner.testnet/proofstream-verifier".into(), version_key: "a".repeat(64), fee: 20_000 }
+    }
+
+    #[test]
+    fn the_signed_message_is_fixed_by_review_commit_verdict_and_caller() {
+        let r = Review { contract: "proofstream-v1.testnet".into(), milestone_id: 7, attempt: 2 };
+        assert_eq!(
+            verdict_message(&r, SHA, "partial", 60, "proofstream-checker-owner.testnet"),
+            "proofstream-verdict:v1:proofstream-v1.testnet:7:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:partial:60:proofstream-checker-owner.testnet"
+        );
+    }
+
+    #[test]
+    fn the_judge_needs_a_verifier_to_ask_and_the_verifier_must_not_have_one() {
+        let mut i = input();
+        assert!(!role_fits_input(&JUDGE, &i));
+        assert!(role_fits_input(&VERIFIER, &i));
+        i.verifier = Some(call());
+        assert!(role_fits_input(&JUDGE, &i));
+        assert!(!role_fits_input(&VERIFIER, &i));
+    }
+
+    #[test]
+    fn input_refuses_a_contract_that_could_break_the_signed_message() {
+        for contract in ["", "Proofstream.testnet", "a:b.testnet", &"a".repeat(MAX_ACCOUNT_LEN + 1)] {
+            let mut i = input();
+            i.review.contract = contract.into();
+            assert!(!valid_input(&i), "{contract}");
+        }
+    }
+
+    #[test]
+    fn input_refuses_a_verifier_fee_over_the_cap_or_an_unpinned_version() {
+        let mut i = input();
+        i.verifier = Some(call());
+        assert!(valid_input(&i));
+        for change in [
+            |c: &mut VerifierCall| c.fee = MAX_VERIFIER_FEE + 1,
+            |c: &mut VerifierCall| c.version_key = "latest".into(),
+            |c: &mut VerifierCall| c.project_id = "no-slash".into(),
+            |c: &mut VerifierCall| c.project_id = "owner.testnet/a/b".into(),
+        ] {
+            let mut c = call();
+            change(&mut c);
+            i.verifier = Some(c.clone());
+            assert!(!valid_input(&i), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn input_without_a_review_does_not_parse() {
+        let old = json!({ "owner": "o", "repo": "r", "base_sha": OTHER, "head_sha": SHA, "changed_files": 1,
+            "milestone_text": "m", "certified_pct": 0, "prior": [] });
+        assert!(serde_json::from_value::<Input>(old).is_err());
+    }
+
+    #[test]
+    fn the_verifier_signs_its_verdict_or_its_early_status() {
+        let a = read_answer(&answer_pct(SHA, "partial", 60), SHA).unwrap();
+        assert_eq!(signed_verdict(Some(&a), ""), ("partial", 60));
+        assert_eq!(signed_verdict(None, "too_large"), ("too_large", 0));
+        assert_eq!(signed_verdict(None, "incomplete_diff"), ("incomplete_diff", 0));
+    }
+
+    fn reply(output: Value) -> Vec<u8> {
+        json!({ "call_id": "90e7a400-1cd7-4e81-9266-ad9636febd33", "status": "completed", "output": output }).to_string().into_bytes()
+    }
+
+    fn signed(verdict: &str, pct: u64) -> Value {
+        json!({ "status": "verified", "role": "verifier", "head_sha": SHA, "verdict": verdict, "percent_done": pct,
+                "caller": "proofstream-checker-owner.testnet", "signature": "ab".repeat(64), "reasons": ["r"] })
+    }
+
+    #[test]
+    fn a_signed_verifier_reply_is_passed_on_in_shape() {
+        let block = read_verifier_reply(200, &reply(signed("partial", 60)), SHA);
+        assert_eq!(block, json!({ "verdict": "partial", "percent_done": 60, "caller": "proofstream-checker-owner.testnet",
+            "signature": "ab".repeat(64), "call_id": "90e7a400-1cd7-4e81-9266-ad9636febd33" }));
+    }
+
+    #[test]
+    fn every_bad_verifier_reply_becomes_an_error_code() {
+        let mut wrong_role = signed("meets", 100);
+        wrong_role["role"] = json!("judge");
+        let mut wrong_head = signed("meets", 100);
+        wrong_head["head_sha"] = json!(OTHER);
+        let mut short_sig = signed("meets", 100);
+        short_sig["signature"] = json!("ab");
+        let mut no_sig = signed("meets", 100);
+        no_sig.as_object_mut().unwrap().remove("signature");
+        let mut bad_caller = signed("meets", 100);
+        bad_caller["caller"] = json!("Evil:caller");
+        let not_completed = json!({ "call_id": "x", "status": "failed", "error": "Access denied" }).to_string().into_bytes();
+        let cases: Vec<(u16, Vec<u8>, &str)> = vec![
+            (402, reply(signed("meets", 100)), "verifier_http_status"),
+            (200, b"not json".to_vec(), "verifier_bad_json"),
+            (200, not_completed, "verifier_not_completed"),
+            (200, reply(wrong_role), "verifier_wrong_reply"),
+            (200, reply(wrong_head), "verifier_wrong_reply"),
+            (200, reply(no_sig), "verifier_unsigned"),
+            (200, reply(short_sig), "verifier_unsigned"),
+            (200, reply(bad_caller), "verifier_unsigned"),
+            (200, reply(signed("approve", 100)), "verifier_unsigned"),
+            (200, reply(signed("meets", 101)), "verifier_unsigned"),
+        ];
+        for (status, body, code) in cases {
+            assert_eq!(read_verifier_reply(status, &body, SHA), json!({ "error": code }), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_verifier_reply_with_an_unsafe_call_id_is_refused() {
+        let body = json!({ "call_id": "../x", "status": "completed", "output": signed("meets", 100) }).to_string().into_bytes();
+        assert_eq!(read_verifier_reply(200, &body, SHA), json!({ "error": "verifier_wrong_reply" }));
     }
 }

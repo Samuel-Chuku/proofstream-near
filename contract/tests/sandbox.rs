@@ -98,7 +98,10 @@ async fn setup() -> Env {
     pass(ft.call("new").args_json(json!({ "owner_id": funder.id(), "total_supply": SUPPLY.to_string() })).transact().await.unwrap(), "ft new");
     let outlayer = worker.dev_deploy(&w.outlayer).await.unwrap();
     pass(outlayer.call("new").args_json(json!({ "token": ft.id() })).transact().await.unwrap(), "outlayer new");
-    let ps = worker.dev_deploy(&w.milestones).await.unwrap();
+    // A fixed name: the verifier's signed verdict names the contract (D48), and the test
+    // signatures in tests/fixtures are made for this one.
+    let ps_account = root.create_subaccount("ps").initial_balance(NearToken::from_near(50)).transact().await.unwrap().into_result().unwrap();
+    let ps = ps_account.deploy(&w.milestones).await.unwrap().into_result().unwrap();
     pass(
         ps.call("new")
             .args_json(json!({ "token": ft.id(), "outlayer": outlayer.id(), "min_budget": "1000000", "min_deadline_seconds": MIN_DEADLINE_S }))
@@ -132,7 +135,7 @@ fn pins() -> Value {
         "checker": { "project_id": CHECKER, "wasm_hash": HASH },
         "binder": { "project_id": BINDER, "wasm_hash": HASH },
         "judge": { "project_id": JUDGE, "wasm_hash": HASH },
-        "verifier": { "project_id": VERIFIER, "wasm_hash": HASH, "fee": FEE.to_string() },
+        "verifier": { "project_id": VERIFIER, "wasm_hash": HASH, "fee": FEE.to_string(), "public_key": VERIFIER_KEY },
     })
 }
 
@@ -212,9 +215,45 @@ fn ai(role: &str, verdict: &str, head: &str) -> Value {
     ai_pct(role, verdict, head, 100)
 }
 
+/// D48: the verifier's test key and the judge pin's owner, who pays for its run.
+const VERIFIER_KEY: &str = "f5c3e2136054b44445215634ef19540c9cae7d22199d2b6595d12063dca403fe";
+const JUDGE_OWNER: &str = "checker-owner.testnet";
+const SIGS: &str = include_str!("fixtures/verifier-sigs.json");
+
+/// A real ed25519 signature by the test key (tests/fixtures/sign-verifier.mjs). A message
+/// not there yet is written down for that script to sign.
+fn sig_for(message: &str) -> String {
+    let fixture: Value = serde_json::from_str(SIGS).unwrap();
+    if let Some(sig) = fixture["sigs"][message].as_str() {
+        return sig.into();
+    }
+    use std::io::Write;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/missing-verifier-sigs.txt");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+    writeln!(f, "{message}").unwrap();
+    panic!("no test signature for {message}: run `node tests/fixtures/sign-verifier.mjs`");
+}
+
+/// The judge's run as it would come back: its own answer, carrying the verifier's verdict
+/// signed for this contract, milestone and attempt when the verifier gave one. A verifier
+/// script of `Null` or `Refuse` means the judge couldn't get a second opinion.
 async fn review(env: &Env, id: u64, judge: Value, verifier: Value) -> ExecutionFinalResult {
+    let attempt = milestone(env, id).await["paid_attempts_used"].as_u64().unwrap() + 1;
+    let judge = match judge["Output"].as_str().map(|s| serde_json::from_str::<Value>(s).unwrap()) {
+        Some(mut out) => {
+            out["verifier"] = match verifier["Output"].as_str().map(|s| serde_json::from_str::<Value>(s).unwrap()) {
+                Some(v) => {
+                    let (verdict, pct) = (v["verdict"].as_str().unwrap().to_string(), v["percent_done"].as_u64().unwrap());
+                    let message = format!("proofstream-verdict:v1:{}:{id}:{attempt}:{}:{verdict}:{pct}:{JUDGE_OWNER}", env.ps.id(), v["head_sha"].as_str().unwrap());
+                    json!({ "verdict": verdict, "percent_done": pct, "caller": JUDGE_OWNER, "signature": sig_for(&message), "call_id": "call-1" })
+                }
+                None => json!({ "error": "verifier_not_completed" }),
+            };
+            output(out)
+        }
+        None => judge,
+    };
     script(env, JUDGE, judge).await;
-    script(env, VERIFIER, verifier).await;
     env.relayer.call(env.ps.id(), "review").args_json(json!({ "milestone_id": id }))
         .deposit(NearToken::from_millinear(100)).gas(MAX_GAS).transact().await.unwrap()
 }
@@ -340,7 +379,7 @@ async fn merged_pr_with_both_ais_meeting_pays_the_payee() {
 }
 
 #[tokio::test]
-async fn each_ai_call_carries_the_prs_file_count_and_its_own_owner() {
+async fn the_one_ai_call_is_the_judges_paid_its_fee_with_its_own_owners_secrets() {
     let env = setup().await;
     let id = ready(&env).await;
     pass(claim(&env, id, checker(true, HEAD)).await, "claim");
@@ -348,15 +387,14 @@ async fn each_ai_call_carries_the_prs_file_count_and_its_own_owner() {
     let calls: Vec<String> = env.outlayer.view("get_calls").await.unwrap().json().unwrap();
     let ai: Vec<Value> = calls.iter().map(|c| serde_json::from_str::<Value>(c).unwrap())
         .filter(|c| [JUDGE, VERIFIER].contains(&c["source"]["Project"]["project_id"].as_str().unwrap())).collect();
-    assert_eq!(ai.len(), 2);
-    for call in &ai {
-        let project = call["source"]["Project"]["project_id"].as_str().unwrap();
-        assert_eq!(call["secrets_ref"]["account_id"], project.split('/').next().unwrap());
-        let input: Value = serde_json::from_str(call["input_data"].as_str().unwrap()).unwrap();
-        assert_eq!(input["changed_files"], 2);
-    }
-    let verifier = ai.iter().find(|c| c["source"]["Project"]["project_id"] == VERIFIER).unwrap();
-    assert_eq!(verifier["params"]["attached_usd"], FEE.to_string(), "the verifier is paid its fee");
+    assert_eq!(ai.len(), 1, "D48: the judge asks the verifier itself");
+    let call = &ai[0];
+    assert_eq!(call["source"]["Project"]["project_id"], JUDGE);
+    assert_eq!(call["secrets_ref"]["account_id"], JUDGE_OWNER);
+    let input: Value = serde_json::from_str(call["input_data"].as_str().unwrap()).unwrap();
+    assert_eq!(input["changed_files"], 2);
+    assert_eq!(input["verifier"]["project_id"], VERIFIER);
+    assert_eq!(call["params"]["attached_usd"], FEE.to_string(), "the judge is paid the second opinion's fee");
 }
 
 // ---------------------------------------------------------------- objections and the funder
@@ -411,12 +449,12 @@ async fn a_rejected_pr_cannot_be_claimed_again_on_that_milestone() {
 // ---------------------------------------------------------------- fee ledger at OutLayer
 
 #[tokio::test]
-async fn a_failed_verifier_run_leaves_credit_that_the_next_review_spends() {
+async fn a_failed_judge_run_leaves_credit_that_the_next_review_spends() {
     let env = setup().await;
     let id = ready(&env).await;
     pass(claim(&env, id, checker(true, HEAD)).await, "claim");
 
-    let r = ok(review(&env, id, ai("judge", "meets", HEAD), json!("Null")).await, "review 1");
+    let r = ok(review(&env, id, json!("Null"), ai("verifier", "meets", HEAD)).await, "review 1");
     assert!(logged(&r, "review_retry"), "{:?}", r.logs());
     assert_eq!(state(&env, id).await, "HardFactsPassed");
     assert_eq!(outlayer_balance(&env).await, FEE, "the fee came back to the contract's OutLayer balance");
@@ -437,7 +475,7 @@ async fn a_refused_admission_also_leaves_the_fee_as_credit() {
     let env = setup().await;
     let id = ready(&env).await;
     pass(claim(&env, id, checker(true, HEAD)).await, "claim");
-    let r = ok(review(&env, id, ai("judge", "meets", HEAD), json!("Refuse")).await, "review");
+    let r = ok(review(&env, id, json!("Refuse"), ai("verifier", "meets", HEAD)).await, "review");
     assert!(logged(&r, "review_retry"), "{:?}", r.logs());
     assert_eq!(outlayer_balance(&env).await, FEE);
     assert_reconciles(&env).await;

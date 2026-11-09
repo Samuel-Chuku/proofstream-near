@@ -25,6 +25,9 @@ sha3 = { version = "=0.12.0", default-features = false }
 [target.'cfg(target_os = "wasi")'.dependencies]
 wasi-http-client = "0.2.1"
 wasi = "=0.13.3"
+# D48: bindings for OutLayer's `outlayer:signing-keys` host interface (wit/signing-keys.wit,
+# a copy of the worker's own). Same version as OutLayer's signing-key-probe.
+wit-bindgen = "=0.36.0"
 
 [profile.release]
 opt-level = "z"

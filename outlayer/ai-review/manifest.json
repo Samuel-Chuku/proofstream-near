@@ -1,0 +1,6 @@
+{
+  "display": { "name": "ProofStream AI review (judge or verifier, by project)" },
+  "signing_keys": [
+    { "path": "verdict", "type": "ed25519", "caller": "none" }
+  ]
+}

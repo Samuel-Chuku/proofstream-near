@@ -201,6 +201,85 @@ struct AiOutput {
     percent_done: Option<u8>,
 }
 
+/// D48: the verifier's verdict as the judge passed it on, signed in the verifier's enclave.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct VerifierClaim {
+    pub verdict: String,
+    pub percent_done: u8,
+    pub caller: String,
+    pub signature: String,
+    pub call_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+struct JudgeOutput {
+    verifier: Option<VerifierClaim>,
+}
+
+/// Prefix of every message the verifier signs; the ai-review crate composes the same.
+pub const VERDICT_PREFIX: &str = "proofstream-verdict:v1";
+
+/// What the verifier signed for this review (D48). Built from the contract's own state:
+/// only `verdict`, `percent` and `caller` come from the claim, and they are checked below.
+pub fn verdict_message(contract: &str, milestone_id: u64, attempt: u32, head_sha: &str, verdict: &str, percent: u8, caller: &str) -> String {
+    format!("{VERDICT_PREFIX}:{contract}:{milestone_id}:{attempt}:{head_sha}:{verdict}:{percent}:{caller}")
+}
+
+/// The verifier's claim, if the judge's output carries one. Absent, `null` or an error
+/// block (the judge objected first, or couldn't reach the verifier) is no claim.
+pub fn verifier_claim(judge_bytes: &[u8]) -> Option<VerifierClaim> {
+    near_sdk::serde_json::from_slice::<JudgeOutput>(judge_bytes).ok()?.verifier
+}
+
+/// Which review a signed verdict must name.
+pub struct ReviewRef<'a> {
+    pub contract: &'a str,
+    pub milestone_id: u64,
+    pub attempt: u32,
+    pub head_sha: &'a str,
+    /// The judge's project owner: the account that pays for the verifier's run.
+    pub judge_owner: &'a str,
+    /// The verifier's in-enclave signing key, pinned in the milestone (hex, 32 bytes).
+    pub verifier_key: &'a str,
+}
+
+/// D48: a verifier verdict counts only if its signature checks against the pinned key over
+/// the message this review should produce, and the run was paid by the judge's owner.
+/// Then it is read as `read_ai` reads a verdict: meets is 100, partial 1-99, the rest object.
+pub fn read_verifier_claim(claim: Option<&VerifierClaim>, review: &ReviewRef) -> AiAnswer {
+    let Some(c) = claim else { return AiAnswer::Failed };
+    if c.caller != review.judge_owner {
+        return AiAnswer::Failed;
+    }
+    let (Some(signature), Some(key)) = (hex_array::<64>(&c.signature), hex_array::<32>(review.verifier_key)) else {
+        return AiAnswer::Failed;
+    };
+    let message = verdict_message(review.contract, review.milestone_id, review.attempt, review.head_sha, &c.verdict, c.percent_done, &c.caller);
+    if !near_sdk::env::ed25519_verify(&signature, message.as_bytes(), &key) {
+        return AiAnswer::Failed;
+    }
+    match (c.verdict.as_str(), c.percent_done) {
+        ("meets", FULL_PCT) => AiAnswer::Progress(FULL_PCT),
+        ("partial", p) if (1..FULL_PCT).contains(&p) => AiAnswer::Progress(p),
+        (v @ ("does_not_meet" | "unclear" | "too_large" | "incomplete_diff"), _) => AiAnswer::Objects(v.into()),
+        _ => AiAnswer::Failed,
+    }
+}
+
+/// Lowercase hex of exactly `N` bytes.
+pub fn hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// A verdict counts only if the enclave verified the model's signature, it names this
 /// commit, and it came from the expected role. One build serves both roles, chosen by
 /// the OutLayer project, so a pin naming the wrong project can't stand in for the other AI.

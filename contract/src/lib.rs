@@ -101,8 +101,11 @@ pub struct Pin {
 pub struct VerifierPin {
     pub project_id: String,
     pub wasm_hash: String,
-    /// Paid to the verifier's owner per review, in the token's minimal units (D22).
+    /// Paid per review for the second opinion, in the token's minimal units (D22). D48: the
+    /// contract pays it to the judge's owner, whose run passes it on to the verifier.
     pub fee: U128,
+    /// D48: the verifier project's in-enclave ed25519 key (hex), which signs its verdicts.
+    pub public_key: String,
 }
 
 /// D28: fixed at creation, never changed for that milestone.
@@ -295,7 +298,8 @@ fn succeeded(index: u64) -> bool {
 
 /// The AIs' input, from stored state only (D15 rule 2). Earlier paid parts go with it, so
 /// redoing paid work earns nothing (D45).
-fn ai_input(m: &Milestone, base_sha: &str, head_sha: &str, changed_files: u64) -> Value {
+fn ai_input(m: &Milestone, review: (u64, u32), base_sha: &str, head_sha: &str, changed_files: u64) -> Value {
+    let (milestone_id, attempt) = review;
     json!({
         "owner": m.repo_owner,
         "repo": m.repo_name,
@@ -305,6 +309,14 @@ fn ai_input(m: &Milestone, base_sha: &str, head_sha: &str, changed_files: u64) -
         "milestone_text": m.milestone_text,
         "certified_pct": m.certified_pct,
         "prior": m.parts.iter().map(|p| json!({ "base_sha": p.base_sha, "head_sha": p.head_sha })).collect::<Vec<_>>(),
+        // D48: signed into the verifier's verdict, so a verdict can't be reused elsewhere.
+        "review": { "contract": env::current_account_id(), "milestone_id": milestone_id, "attempt": attempt },
+        // D48: the judge buys the second opinion from exactly this verifier build.
+        "verifier": {
+            "project_id": m.pins.verifier.project_id,
+            "version_key": m.pins.verifier.wasm_hash,
+            "fee": u64::try_from(m.pins.verifier.fee.0).unwrap_or(u64::MAX),
+        },
     })
 }
 
@@ -406,7 +418,8 @@ impl Contract {
                 && valid_pin(&pins.binder.project_id, &pins.binder.wasm_hash)
                 && valid_pin(&pins.judge.project_id, &pins.judge.wasm_hash)
                 && valid_pin(&pins.verifier.project_id, &pins.verifier.wasm_hash)
-                && pins.verifier.fee.0 > 0,
+                && pins.verifier.fee.0 > 0
+                && rules::hex_array::<32>(&pins.verifier.public_key).is_some(),
             "bad pins"
         );
         require!(
@@ -854,28 +867,17 @@ impl Contract {
             emit("review_refused", json!({ "milestone_id": milestone_id, "reason": "FeeDepositFailed" }));
             return;
         }
-        let input = ai_input(&m, &base_sha, &head_sha, changed_files);
-        let half = NearToken::from_yoctonear(deposit.as_yoctonear() / 2);
-        let verifier_pin = Pin { project_id: m.pins.verifier.project_id.clone(), wasm_hash: m.pins.verifier.wasm_hash.clone() };
-        let judge = Promise::new(self.outlayer.clone()).function_call_weight(
-            "request_execution",
-            request_args(&m.pins.judge, &input, true, &caller, None),
-            half,
-            AI_REQUEST_GAS,
-            GasWeight(1),
-        );
-        let verifier = Promise::new(self.outlayer.clone()).function_call_weight(
-            "request_execution",
-            request_args(&verifier_pin, &input, true, &caller, Some(m.pins.verifier.fee.0)),
-            deposit.saturating_sub(half),
-            AI_REQUEST_GAS,
-            GasWeight(1),
-        );
-        let _ = judge.and(verifier).then(
-            Self::ext(env::current_account_id())
-                .with_static_gas(ON_REVIEWED_GAS)
-                .on_reviewed(milestone_id, caller, half, deposit.saturating_sub(half)),
-        );
+        let input = ai_input(&m, (milestone_id, m.paid_attempts_used), &base_sha, &head_sha, changed_files);
+        // D48: one run. The judge is paid the second opinion's fee and buys it itself.
+        let _ = Promise::new(self.outlayer.clone())
+            .function_call_weight(
+                "request_execution",
+                request_args(&m.pins.judge, &input, true, &caller, Some(m.pins.verifier.fee.0)),
+                deposit,
+                AI_REQUEST_GAS,
+                GasWeight(1),
+            )
+            .then(Self::ext(env::current_account_id()).with_static_gas(ON_REVIEWED_GAS).on_reviewed(milestone_id, caller, deposit));
     }
 
     #[private]
@@ -883,29 +885,20 @@ impl Contract {
         &mut self,
         milestone_id: u64,
         caller: AccountId,
-        judge_deposit: NearToken,
-        verifier_deposit: NearToken,
+        deposit: NearToken,
     ) {
         let m = self.milestone(milestone_id).clone();
         let State::Reviewing { pr, base_sha, head_sha, merged, changed_files } = m.state.clone() else {
             env::panic_str("callback does not match the review in flight");
         };
         let judge_raw = env::promise_result_checked(0, MAX_RESULT_BYTES);
-        let verifier_raw = env::promise_result_checked(1, MAX_RESULT_BYTES);
-        // Admission failures return NEAR here; OutLayer refunds every other path itself.
-        let mut back = NearToken::from_yoctonear(0);
+        // An admission failure returns NEAR here; OutLayer refunds every other path itself.
         if matches!(judge_raw, Err(PromiseError::Failed)) {
-            back = back.saturating_add(judge_deposit);
-        }
-        if matches!(verifier_raw, Err(PromiseError::Failed)) {
-            back = back.saturating_add(verifier_deposit);
-        }
-        if !back.is_zero() {
-            let _ = Promise::new(caller).transfer(back);
+            let _ = Promise::new(caller).transfer(deposit);
         }
         // OutLayer returns `null` for a failed or timed-out run and puts the fee back in this
         // contract's balance; a refused admission never took it. Either way it's credit.
-        let fee_back = match &verifier_raw {
+        let fee_back = match &judge_raw {
             Err(PromiseError::Failed) => true,
             Ok(bytes) => bytes.as_slice() == b"null",
             Err(_) => false,
@@ -913,15 +906,29 @@ impl Contract {
         if fee_back {
             self.add_credit(milestone_id, m.pins.verifier.fee.0);
         }
-        let read = |r: &Result<Vec<u8>, PromiseError>, role: &str| match r {
-            Ok(bytes) => rules::read_ai(bytes, &head_sha, role),
-            Err(_) => AiAnswer::Failed,
+        let (judge, verifier, verifier_call) = match &judge_raw {
+            Ok(bytes) => {
+                let judge_owner = rules::project_owner(&m.pins.judge.project_id).unwrap_or_default();
+                let contract = env::current_account_id();
+                let review = rules::ReviewRef {
+                    contract: contract.as_str(),
+                    milestone_id,
+                    attempt: m.paid_attempts_used,
+                    head_sha: &head_sha,
+                    judge_owner,
+                    verifier_key: &m.pins.verifier.public_key,
+                };
+                let claim = rules::verifier_claim(bytes);
+                let call = claim.as_ref().map(|c| c.call_id.clone());
+                (rules::read_ai(bytes, &head_sha, "judge"), rules::read_verifier_claim(claim.as_ref(), &review), call)
+            }
+            Err(_) => (AiAnswer::Failed, AiAnswer::Failed, None),
         };
-        let (judge, verifier) = (read(&judge_raw, "judge"), read(&verifier_raw, "verifier"));
         emit(
             "review_result",
             json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha,
-                    "judge": format!("{judge:?}"), "verifier": format!("{verifier:?}"), "fee_credited": fee_back }),
+                    "judge": format!("{judge:?}"), "verifier": format!("{verifier:?}"), "verifier_call": verifier_call,
+                    "fee_credited": fee_back }),
         );
         match rules::combine(&judge, &verifier, m.certified_pct) {
             ReviewOutcome::Certify(pct) => {
