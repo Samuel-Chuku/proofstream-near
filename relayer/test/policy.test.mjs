@@ -74,7 +74,7 @@ test('bind: refused unless Funding/Funded, unbound and not in flight', async () 
   await precheck(req, fakeView({ ...base, state: 'Funded' }));
 });
 
-test('claim: refused when unbound, locked, used, not the approved PR, or not claimable', async () => {
+test('claim: refused when unbound, at its most paid parts, locked, used, not the approved PR, or not claimable', async () => {
   const req = parseRequest('claim', { milestone_id: 1, pr_number: 8 });
   await refusesAsync(precheck(req, fakeView({ ...base, state: 'Funded' })), 'payee_not_bound');
   await refusesAsync(precheck(req, fakeView({ ...base, state: 'Funded', payee: bound }, { lock: { Locked: 2 } })), 'pr_locked');
@@ -82,6 +82,9 @@ test('claim: refused when unbound, locked, used, not the approved PR, or not cla
   await refusesAsync(precheck(req, fakeView({ ...base, state: { Approved: { pr: 9, head_sha: 'h' } }, payee: bound })), 'not_the_approved_pr');
   await refusesAsync(precheck(req, fakeView({ ...base, state: { Paid: { pr: 8 } }, payee: bound })), 'not_claimable');
   await refusesAsync(precheck(req, fakeView({ ...base, state: 'Refunded', payee: bound })), 'not_claimable');
+  const fiveParts = Array.from({ length: 5 }, (_, i) => ({ pr: i, base_sha: 'b', head_sha: 'h', pct: 10 * (i + 1) }));
+  await refusesAsync(precheck(req, fakeView({ ...base, state: 'Funded', payee: bound, parts: fiveParts })), 'max_parts_paid');
+  await precheck(req, fakeView({ ...base, state: 'Funded', payee: bound, parts: fiveParts.slice(1) }));
   await precheck(req, fakeView({ ...base, state: 'Funded', payee: bound }));
   await precheck(req, fakeView({ ...base, state: { Approved: { pr: 8, head_sha: 'h' } }, payee: bound }));
 });

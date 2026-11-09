@@ -14,6 +14,8 @@ export const COMPUTE_PER_FACTS_RUN = 10n * YOCTO_PER_MILLINEAR;
 export const COMPUTE_PER_AI_RUN = 30n * YOCTO_PER_MILLINEAR;
 const TOKEN_STORAGE = 1_250n * YOCTO_PER_MICRONEAR;
 const IMPLICIT_PROBE = 50n * YOCTO_PER_MILLINEAR;
+// Mirrors MAX_PARTS (D45): a milestone pays at most this many PRs.
+const MAX_PARTS = 5;
 
 export const METHODS = Object.freeze({
   bind_payee: { deposit: TOKEN_STORAGE + IMPLICIT_PROBE + COMPUTE_PER_FACTS_RUN, fields: ['milestone_id', 'gist_id'] },
@@ -90,6 +92,7 @@ export async function precheck(req, view) {
 
   if (req.method === 'claim') {
     if (!m.payee) throw new Refusal('payee_not_bound', 409);
+    if ((m.parts ?? []).length >= MAX_PARTS) throw new Refusal('max_parts_paid', 409);
     if (state === 'Funded') {
       const pr = req.prNumber;
       if (await view('get_lock', { repo_id: m.repo_id, pr_number: pr })) throw new Refusal('pr_locked', 409);

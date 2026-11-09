@@ -145,7 +145,7 @@ fn checker(merged: bool) -> Value {
 
 fn checked(c: &mut Contract, id: u64, approved: Option<&str>, result: PromiseResult) {
     set_callback(vec![result]);
-    c.on_checked(id, PR, approved.map(String::from), acc("anyone.testnet"), MIN_CLAIM_DEPOSIT);
+    c.on_checked(id, PR, approved.map(|h| (h.to_string(), 100)), acc("anyone.testnet"), MIN_CLAIM_DEPOSIT);
 }
 
 fn checked_json(c: &mut Contract, id: u64, output: Value) {
@@ -170,8 +170,12 @@ fn fee_ready(c: &mut Contract, id: u64, taken: Vec<(u64, U128)>, new_deposit: u1
     c.on_fee_ready(id, acc("anyone.testnet"), MIN_AI_DEPOSIT.saturating_mul(2), taken, U128(new_deposit));
 }
 
+fn ai_pct(role: &str, verdict: &str, head: &str, pct: u8) -> Value {
+    json!({ "status": "verified", "role": role, "head_sha": head, "verdict": verdict, "percent_done": pct })
+}
+
 fn ai(role: &str, verdict: &str, head: &str) -> Value {
-    json!({ "status": "verified", "role": role, "head_sha": head, "verdict": verdict })
+    ai_pct(role, verdict, head, 100)
 }
 
 fn judge_ai(verdict: &str, head: &str) -> Value {
@@ -639,7 +643,7 @@ fn both_meet_on_a_merged_pr_starts_the_payout() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
     full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
-    assert_eq!(state(&c, id), State::PayingOut { pr: PR });
+    assert_eq!(state(&c, id), State::PayingOut { part: Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 100 }, amount: U128(BUDGET) });
 }
 
 #[test]
@@ -647,7 +651,7 @@ fn both_meet_on_an_open_pr_records_approval_and_moves_no_money() {
     let mut c = new_contract();
     let id = passed(&mut c, false);
     full_review(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
-    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into() });
+    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into(), pct: 100 });
     assert_eq!(c.get_lock(REPO_ID, PR), Some(PrLock::Locked(id)));
     assert!(logged("verdict_approved_premerge"));
     assert_eq!(c.get_milestone(id).unwrap().budget, U128(BUDGET));
@@ -821,7 +825,7 @@ fn merged_at_the_approved_head_pays_without_another_review() {
     let id = approved(&mut c);
     claim(&mut c, id, PR);
     checked(&mut c, id, Some(HEAD), ok(&checker(true)));
-    assert_eq!(state(&c, id), State::PayingOut { pr: PR });
+    assert_eq!(state(&c, id), State::PayingOut { part: Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 100 }, amount: U128(BUDGET) });
     assert_eq!(c.get_milestone(id).unwrap().paid_attempts_used, 1, "no second fee");
 }
 
@@ -831,7 +835,7 @@ fn still_open_stays_approved_and_locked() {
     let id = approved(&mut c);
     claim(&mut c, id, PR);
     checked(&mut c, id, Some(HEAD), ok(&checker(false)));
-    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into() });
+    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into(), pct: 100 });
     assert_eq!(c.get_lock(REPO_ID, PR), Some(PrLock::Locked(id)));
 }
 
@@ -854,7 +858,7 @@ fn an_approval_still_needs_the_merge_facts() {
     let mut out = checker(true);
     out["independent_approval"] = false.into();
     checked(&mut c, id, Some(HEAD), ok(&out));
-    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into() });
+    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into(), pct: 100 });
     assert!(logged("NoIndependentApproval"));
 }
 
@@ -889,7 +893,7 @@ fn only_the_funder_can_release() {
     let id = passed(&mut c, true);
     full_review(&mut c, id, ok(&judge_ai("unclear", HEAD)), ok(&verifier_ai("meets", HEAD)));
     set("payee.testnet", NearToken::from_near(0));
-    let _ = c.funder_release(id);
+    let _ = c.funder_release(id, 100);
 }
 
 #[test]
@@ -898,8 +902,8 @@ fn the_funder_can_release_a_held_milestone() {
     let id = passed(&mut c, true);
     full_review(&mut c, id, ok(&judge_ai("unclear", HEAD)), ok(&verifier_ai("meets", HEAD)));
     set("funder.testnet", NearToken::from_near(0));
-    let _ = c.funder_release(id);
-    assert_eq!(state(&c, id), State::PayingOut { pr: PR });
+    let _ = c.funder_release(id, 100);
+    assert_eq!(state(&c, id), State::PayingOut { part: Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 100 }, amount: U128(BUDGET) });
 }
 
 #[test]
@@ -1005,10 +1009,10 @@ fn a_failed_payout_can_be_retried_by_anyone() {
     let id = paying(&mut c);
     set_callback(vec![PromiseResult::Failed]);
     c.on_transferred(id, U128(BUDGET), Transfer::Payout, State::Funded);
-    assert_eq!(state(&c, id), State::PayoutFailed { pr: PR });
+    assert_eq!(state(&c, id), State::PayoutFailed { part: Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 100 }, amount: U128(BUDGET) });
     set("stranger.testnet", NearToken::from_near(0));
     let _ = c.retry_payout(id);
-    assert_eq!(state(&c, id), State::PayingOut { pr: PR });
+    assert_eq!(state(&c, id), State::PayingOut { part: Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 100 }, amount: U128(BUDGET) });
 }
 
 #[test]
@@ -1029,4 +1033,215 @@ fn a_stale_review_result_cannot_touch_the_milestone() {
     let mut c = new_contract();
     let id = passed(&mut c, true);
     reviewed(&mut c, id, ok(&judge_ai("meets", HEAD)), ok(&verifier_ai("meets", HEAD)));
+}
+
+// ---------------------------------------------------------------- D45 partial certification
+
+const PR2: u64 = 10;
+
+fn checker_for(pr: u64, head: &str, merged: bool) -> Value {
+    let mut v = checker(merged);
+    v["pr_number"] = json!(pr);
+    v["head_sha"] = json!(head);
+    v
+}
+
+fn checked_pr(c: &mut Contract, id: u64, pr: u64, output: Value) {
+    set_callback(vec![ok(&output)]);
+    c.on_checked(id, pr, None, acc("anyone.testnet"), MIN_CLAIM_DEPOSIT);
+}
+
+fn pct_of(pct: u128) -> u128 {
+    BUDGET * pct / 100
+}
+
+fn both(verdict_j: &str, j: u8, verdict_v: &str, v: u8, head: &str) -> (PromiseResult, PromiseResult) {
+    (ok(&ai_pct("judge", verdict_j, head, j)), ok(&ai_pct("verifier", verdict_v, head, v)))
+}
+
+/// The payout callback for whatever the milestone is paying out now.
+fn payout_lands(c: &mut Contract, id: u64, success: bool) {
+    let State::PayingOut { amount, .. } = state(c, id) else { panic!("not paying out: {:?}", state(c, id)) };
+    set_callback(vec![if success { ok(&Value::Null) } else { PromiseResult::Failed }]);
+    c.on_transferred(id, amount, Transfer::Payout, State::Funded);
+}
+
+/// PR 9 merged, reviewed at `j`/`v` percent partial, and paid.
+fn paid_partial(c: &mut Contract, j: u8, v: u8) -> u64 {
+    let id = passed(c, true);
+    let (judge, verifier) = both("partial", j, "partial", v, HEAD);
+    full_review(c, id, judge, verifier);
+    payout_lands(c, id, true);
+    id
+}
+
+#[test]
+fn a_partial_review_pays_the_lower_share_and_reopens_the_milestone() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    let (judge, verifier) = both("partial", 70, "partial", 60, HEAD);
+    full_review(&mut c, id, judge, verifier);
+    let part = Part { pr: PR, base_sha: BASE.into(), head_sha: HEAD.into(), pct: 60 };
+    assert_eq!(state(&c, id), State::PayingOut { part: part.clone(), amount: U128(pct_of(60)) });
+    payout_lands(&mut c, id, true);
+    let m = c.get_milestone(id).unwrap();
+    assert_eq!(m.state, State::Funded);
+    assert_eq!((m.budget, m.certified_pct, m.parts), (U128(BUDGET - pct_of(60)), 60, vec![part]));
+    assert_eq!(c.get_lock(REPO_ID, PR), Some(PrLock::Spent(id)));
+    assert!(c.is_pr_used(id, PR));
+    assert_reconciles(&c);
+}
+
+#[test]
+fn a_later_pr_pays_only_the_new_share_and_100_pays_the_rest() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 60, 60);
+    claim(&mut c, id, PR2);
+    checked_pr(&mut c, id, PR2, checker_for(PR2, NEW_HEAD, true));
+    let (judge, verifier) = both("meets", 100, "meets", 100, NEW_HEAD);
+    full_review(&mut c, id, judge, verifier);
+    let State::PayingOut { amount, part } = state(&c, id) else { panic!() };
+    assert_eq!((amount, part.pct), (U128(BUDGET - pct_of(60)), 100));
+    payout_lands(&mut c, id, true);
+    let m = c.get_milestone(id).unwrap();
+    assert_eq!((m.state, m.budget, m.certified_pct, m.parts.len()), (State::Paid { pr: PR2 }, U128(0), 100, 2));
+    assert_reconciles(&c);
+}
+
+#[test]
+fn the_ais_see_every_earlier_paid_part() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 60, 60);
+    let m = c.get_milestone(id).unwrap();
+    let input = ai_input(&m, BASE, NEW_HEAD, 3);
+    assert_eq!(input["certified_pct"], 60);
+    assert_eq!(input["prior"], json!([{ "base_sha": BASE, "head_sha": HEAD }]));
+}
+
+#[test]
+fn shares_far_apart_hold_for_the_funder() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    let (judge, verifier) = both("meets", 100, "partial", 60, HEAD);
+    full_review(&mut c, id, judge, verifier);
+    assert!(matches!(state(&c, id), State::Held { reason, .. } if reason == "disagree:100/60"));
+}
+
+#[test]
+fn a_review_that_adds_nothing_holds() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 60, 60);
+    claim(&mut c, id, PR2);
+    checked_pr(&mut c, id, PR2, checker_for(PR2, NEW_HEAD, true));
+    let (judge, verifier) = both("partial", 60, "partial", 55, NEW_HEAD);
+    full_review(&mut c, id, judge, verifier);
+    assert!(matches!(state(&c, id), State::Held { reason, .. } if reason == "no_new_progress:55"));
+    assert_eq!(c.get_milestone(id).unwrap().budget, U128(BUDGET - pct_of(60)));
+}
+
+#[test]
+fn a_share_too_small_to_pay_anything_holds() {
+    let mut c = new_contract();
+    // 1 % of the minimum budget is still 10 000 units, so force a budget where 1 % is 0.
+    let id = passed(&mut c, true);
+    let m = c.milestones.get_mut(&id).unwrap();
+    m.budget_total = U128(50);
+    m.budget = U128(50);
+    let (judge, verifier) = both("partial", 1, "partial", 1, HEAD);
+    full_review(&mut c, id, judge, verifier);
+    assert!(matches!(state(&c, id), State::Held { reason, .. } if reason == "no_new_progress:1"));
+}
+
+#[test]
+fn a_premerge_approval_carries_its_share_and_the_merge_pays_it() {
+    let mut c = new_contract();
+    let id = passed(&mut c, false);
+    let (judge, verifier) = both("partial", 60, "partial", 65, HEAD);
+    full_review(&mut c, id, judge, verifier);
+    assert_eq!(state(&c, id), State::Approved { pr: PR, head_sha: HEAD.into(), pct: 60 });
+    claim(&mut c, id, PR);
+    set_callback(vec![ok(&checker(true))]);
+    c.on_checked(id, PR, Some((HEAD.into(), 60)), acc("anyone.testnet"), MIN_CLAIM_DEPOSIT);
+    let State::PayingOut { amount, part } = state(&c, id) else { panic!("{:?}", state(&c, id)) };
+    assert_eq!((amount, part.pct), (U128(pct_of(60)), 60));
+}
+
+fn held_partial(c: &mut Contract) -> u64 {
+    let id = passed(c, true);
+    let (judge, verifier) = both("unclear", 0, "partial", 50, HEAD);
+    full_review(c, id, judge, verifier);
+    assert!(matches!(state(c, id), State::Held { .. }));
+    id
+}
+
+#[test]
+fn the_funder_releases_a_share_of_their_choosing() {
+    let mut c = new_contract();
+    let id = held_partial(&mut c);
+    set("funder.testnet", NearToken::from_near(0));
+    let _ = c.funder_release(id, 40);
+    let State::PayingOut { amount, part } = state(&c, id) else { panic!() };
+    assert_eq!((amount, part.pct), (U128(pct_of(40)), 40));
+    payout_lands(&mut c, id, true);
+    assert_eq!(state(&c, id), State::Funded);
+    assert_reconciles(&c);
+}
+
+#[test]
+#[should_panic(expected = "percent must be above the certified share and at most 100")]
+fn the_funder_cannot_release_more_than_100() {
+    let mut c = new_contract();
+    let id = held_partial(&mut c);
+    set("funder.testnet", NearToken::from_near(0));
+    let _ = c.funder_release(id, 101);
+}
+
+#[test]
+#[should_panic(expected = "percent must be above the certified share and at most 100")]
+fn the_funder_cannot_release_a_share_already_paid() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 60, 60);
+    claim(&mut c, id, PR2);
+    checked_pr(&mut c, id, PR2, checker_for(PR2, NEW_HEAD, true));
+    let (judge, verifier) = both("unclear", 0, "unclear", 0, NEW_HEAD);
+    full_review(&mut c, id, judge, verifier);
+    set("funder.testnet", NearToken::from_near(0));
+    let _ = c.funder_release(id, 60);
+}
+
+#[test]
+fn after_the_deadline_the_funder_takes_back_the_uncertified_rest() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 60, 60);
+    set_at("funder.testnet", DEADLINE_S);
+    let _ = c.refund(id);
+    let m = c.get_milestone(id).unwrap();
+    assert_eq!(m.state, State::Refunded);
+    let rest = BUDGET - pct_of(60) + m.fee_remaining.0;
+    assert!(logged(&format!("\"amount\":\"{rest}\"")), "{:?}", get_logs());
+}
+
+#[test]
+#[should_panic(expected = "milestone has its most paid parts")]
+fn a_sixth_part_is_refused() {
+    let mut c = new_contract();
+    let id = paid_partial(&mut c, 10, 10);
+    let part = c.get_milestone(id).unwrap().parts[0].clone();
+    c.milestones.get_mut(&id).unwrap().parts = vec![part; MAX_PARTS];
+    claim(&mut c, id, PR2);
+}
+
+#[test]
+fn a_failed_partial_payout_retries_the_same_share() {
+    let mut c = new_contract();
+    let id = passed(&mut c, true);
+    let (judge, verifier) = both("partial", 60, "partial", 60, HEAD);
+    full_review(&mut c, id, judge, verifier);
+    payout_lands(&mut c, id, false);
+    let State::PayoutFailed { amount, part } = state(&c, id) else { panic!() };
+    assert_eq!((amount, part.pct), (U128(pct_of(60)), 60));
+    set("anyone.testnet", NearToken::from_near(0));
+    let _ = c.retry_payout(id);
+    assert!(matches!(state(&c, id), State::PayingOut { amount, .. } if amount == U128(pct_of(60))));
+    assert_reconciles(&c);
 }

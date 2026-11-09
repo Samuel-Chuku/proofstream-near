@@ -33,8 +33,9 @@ const TOKEN_STORAGE: NearToken = NearToken::from_micronear(1_250);
 /// D29: sent to a 64-hex account, which creates it and pays its first transactions.
 const IMPLICIT_PROBE: NearToken = NearToken::from_millinear(50);
 /// Charged at creation on top of the milestone's own bytes, for what it grows into later
-/// (state data, binding, used PRs, locks). The excess is never refunded; it's a few mNEAR.
-const STORAGE_HEADROOM_BYTES: u64 = 1_500;
+/// (state data, binding, used PRs, locks, and up to MAX_PARTS paid parts with their lock and
+/// used-PR records, ~900 bytes, D45). The excess is never refunded; it's a few mNEAR.
+const STORAGE_HEADROOM_BYTES: u64 = 2_500;
 
 // Gas. Requests share unused gas by weight; the figures are the static minimums.
 const CHECKER_REQUEST_GAS: Gas = Gas::from_tgas(100);
@@ -75,6 +76,8 @@ const MAX_REQUIRED_CHECKS: usize = 8;
 const MAX_REASON_BYTES: usize = 280;
 const MAX_GIST_ID_BYTES: usize = 64;
 const NONCE_HASH_BYTES: usize = 16;
+/// D45: paid parts per milestone; the AI sees every earlier one, so this bounds its input.
+const MAX_PARTS: usize = 5;
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -111,6 +114,17 @@ pub struct Pins {
     pub verifier: VerifierPin,
 }
 
+/// D45: one PR's certified share of the milestone. `pct` is the milestone's total
+/// certified share once this PR is paid, not this PR's own increment.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub pr: u64,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub pct: u8,
+}
+
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -119,11 +133,11 @@ pub enum State {
     Checking { pr: u64 },
     HardFactsPassed { pr: u64, base_sha: String, head_sha: String, merged: bool, changed_files: u64 },
     Reviewing { pr: u64, base_sha: String, head_sha: String, merged: bool, changed_files: u64 },
-    /// D36: both AIs said `meets` on the open PR at `head_sha`. Pays once it's merged there.
-    Approved { pr: u64, head_sha: String },
-    Held { pr: u64, head_sha: String, merged: bool, reason: String },
-    PayingOut { pr: u64 },
-    PayoutFailed { pr: u64 },
+    /// D36: both AIs certified `pct` on the open PR at `head_sha`. Pays once it's merged there.
+    Approved { pr: u64, head_sha: String, pct: u8 },
+    Held { pr: u64, base_sha: String, head_sha: String, merged: bool, reason: String },
+    PayingOut { part: Part, amount: U128 },
+    PayoutFailed { part: Part, amount: U128 },
     Paid { pr: u64 },
     Refunded,
 }
@@ -147,7 +161,14 @@ pub struct Milestone {
     pub payee_github_id: u64,
     pub milestone_text: String,
     pub required_checks: Vec<String>,
+    /// Budget not yet paid out.
     pub budget: U128,
+    /// The budget as funded; shares are computed on it (D45).
+    pub budget_total: U128,
+    /// Share of the milestone certified and paid so far, 0-100 (D45). Only rises.
+    pub certified_pct: u8,
+    /// The PRs paid so far, oldest first (D45).
+    pub parts: Vec<Part>,
     pub fee_budget: U128,
     /// Fee not yet spent on reviews.
     pub fee_remaining: U128,
@@ -271,6 +292,30 @@ fn succeeded(index: u64) -> bool {
     !matches!(env::promise_result_checked(index, 0), Err(PromiseError::Failed))
 }
 
+/// The AIs' input, from stored state only (D15 rule 2). Earlier paid parts go with it, so
+/// redoing paid work earns nothing (D45).
+fn ai_input(m: &Milestone, base_sha: &str, head_sha: &str, changed_files: u64) -> Value {
+    json!({
+        "owner": m.repo_owner,
+        "repo": m.repo_name,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_files": changed_files,
+        "milestone_text": m.milestone_text,
+        "certified_pct": m.certified_pct,
+        "prior": m.parts.iter().map(|p| json!({ "base_sha": p.base_sha, "head_sha": p.head_sha })).collect::<Vec<_>>(),
+    })
+}
+
+/// The PR an Approved or PayoutFailed milestone keeps locked.
+fn locked_pr(state: &State) -> Option<u64> {
+    match state {
+        State::Approved { pr, .. } => Some(*pr),
+        State::PayoutFailed { part, .. } => Some(part.pr),
+        _ => None,
+    }
+}
+
 fn valid_pin(project_id: &str, wasm_hash: &str) -> bool {
     rules::project_owner(project_id).is_some() && rules::is_sha256_hex(wasm_hash)
 }
@@ -384,6 +429,9 @@ impl Contract {
                 milestone_text: p.milestone_text,
                 required_checks: p.required_checks,
                 budget: p.budget,
+                budget_total: p.budget,
+                certified_pct: 0,
+                parts: Vec::new(),
                 fee_budget: p.fee_budget,
                 fee_remaining: p.fee_budget,
                 fee_refundable: U128(0),
@@ -610,6 +658,7 @@ impl Contract {
         let key = {
             let m = self.milestone(milestone_id);
             require!(m.payee.is_some(), "payee is not bound yet");
+            require!(m.parts.len() < MAX_PARTS, "milestone has its most paid parts");
             pr_key(m.repo_id, pr_number)
         };
         let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
@@ -630,8 +679,8 @@ impl Contract {
         });
         let args = request_args(&m.pins.checker, &input, false, &caller, None);
         let from_approved = matches!(m.state, State::Approved { .. });
-        let approved_head = match &m.state {
-            State::Approved { head_sha, .. } => Some(head_sha.clone()),
+        let approved = match &m.state {
+            State::Approved { head_sha, pct, .. } => Some((head_sha.clone(), *pct)),
             _ => None,
         };
         self.milestone_mut(milestone_id).state = State::Checking { pr: pr_number };
@@ -641,7 +690,7 @@ impl Contract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(ON_CHECKED_GAS)
-                    .on_checked(milestone_id, pr_number, approved_head, caller, deposit),
+                    .on_checked(milestone_id, pr_number, approved, caller, deposit),
             )
     }
 
@@ -651,7 +700,7 @@ impl Contract {
         &mut self,
         milestone_id: u64,
         pr_number: u64,
-        approved_head: Option<String>,
+        approved: Option<(String, u8)>,
         caller: AccountId,
         deposit: NearToken,
     ) {
@@ -678,8 +727,8 @@ impl Contract {
                 Ok(output) => rules::evaluate(&output, &terms),
             },
         };
-        let back_to = match &approved_head {
-            Some(head) => State::Approved { pr: pr_number, head_sha: head.clone() },
+        let back_to = match &approved {
+            Some((head, pct)) => State::Approved { pr: pr_number, head_sha: head.clone(), pct: *pct },
             None => State::Funded,
         };
         let facts = match facts {
@@ -689,17 +738,19 @@ impl Contract {
                 return;
             }
         };
-        match rules::after_check(&facts, approved_head.as_deref(), m.diff_cap_bytes) {
+        match rules::after_check(&facts, approved.as_ref().map(|(head, _)| head.as_str()), m.diff_cap_bytes) {
             AfterCheck::StillOpen => {
                 self.refuse_claim(milestone_id, pr_number, back_to, "NotMerged");
             }
             AfterCheck::PayNow => {
                 emit("hard_facts_passed", json!({ "milestone_id": milestone_id, "pr": pr_number, "head_sha": facts.head_sha, "merged": true, "approved_premerge": true }));
-                let _ = self.start_payout(milestone_id);
+                let pct = approved.map_or(0, |(_, pct)| pct);
+                let part = Part { pr: pr_number, base_sha: facts.base_sha, head_sha: facts.head_sha, pct };
+                self.certify(milestone_id, part, true);
             }
             AfterCheck::TooLarge => {
                 let reason = format!("too_large:{}", facts.diff_bytes);
-                self.hold(milestone_id, pr_number, facts.head_sha, facts.merged, reason);
+                self.hold(milestone_id, pr_number, facts.base_sha, facts.head_sha, facts.merged, reason);
             }
             AfterCheck::Review => {
                 emit("hard_facts_passed", json!({ "milestone_id": milestone_id, "pr": pr_number, "head_sha": facts.head_sha, "merged": facts.merged }));
@@ -802,14 +853,7 @@ impl Contract {
             emit("review_refused", json!({ "milestone_id": milestone_id, "reason": "FeeDepositFailed" }));
             return;
         }
-        let input = json!({
-            "owner": m.repo_owner,
-            "repo": m.repo_name,
-            "base_sha": base_sha,
-            "head_sha": head_sha,
-            "changed_files": changed_files,
-            "milestone_text": m.milestone_text,
-        });
+        let input = ai_input(&m, &base_sha, &head_sha, changed_files);
         let half = NearToken::from_yoctonear(deposit.as_yoctonear() / 2);
         let verifier_pin = Pin { project_id: m.pins.verifier.project_id.clone(), wasm_hash: m.pins.verifier.wasm_hash.clone() };
         let judge = Promise::new(self.outlayer.clone()).function_call_weight(
@@ -878,20 +922,17 @@ impl Contract {
             json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha,
                     "judge": format!("{judge:?}"), "verifier": format!("{verifier:?}"), "fee_credited": fee_back }),
         );
-        match rules::combine(&judge, &verifier) {
-            ReviewOutcome::BothMeet if merged => {
-                let _ = self.start_payout(milestone_id);
+        match rules::combine(&judge, &verifier, m.certified_pct) {
+            ReviewOutcome::Certify(pct) => {
+                let part = Part { pr, base_sha, head_sha, pct };
+                self.certify(milestone_id, part, merged);
             }
-            ReviewOutcome::BothMeet => {
-                emit("verdict_approved_premerge", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha }));
-                self.milestone_mut(milestone_id).state = State::Approved { pr, head_sha };
-            }
-            ReviewOutcome::Held(reason) => self.hold(milestone_id, pr, head_sha, merged, reason),
+            ReviewOutcome::Held(reason) => self.hold(milestone_id, pr, base_sha, head_sha, merged, reason),
             ReviewOutcome::Retry => {
                 let fee = m.pins.verifier.fee.0;
                 let (used, max) = (m.paid_attempts_used, m.max_paid_attempts);
                 if used >= max || m.fee_remaining.0 < fee {
-                    self.hold(milestone_id, pr, head_sha, merged, "attempts_exhausted".into());
+                    self.hold(milestone_id, pr, base_sha, head_sha, merged, "attempts_exhausted".into());
                 } else {
                     self.milestone_mut(milestone_id).state = State::HardFactsPassed { pr, base_sha, head_sha, merged, changed_files };
                     emit("review_retry", json!({ "milestone_id": milestone_id, "pr": pr, "attempts_left": max - used }));
@@ -902,13 +943,18 @@ impl Contract {
 
     // ---------------------------------------------------------------- funder decisions
 
-    /// Held can only be released (pay the bound payee) or rejected (0.2).
-    pub fn funder_release(&mut self, milestone_id: u64) -> Promise {
-        let m = self.milestone(milestone_id);
+    /// Held can only be released (pay the bound payee) or rejected (0.2). The funder sets
+    /// the milestone's new certified total, above what is already certified (D45).
+    pub fn funder_release(&mut self, milestone_id: u64, percent: u8) -> Promise {
+        let m = self.milestone(milestone_id).clone();
         require!(env::predecessor_account_id() == m.funder, "only the funder");
-        let State::Held { pr, .. } = m.state else { env::panic_str("milestone is not held") };
-        emit("funder_released", json!({ "milestone_id": milestone_id, "pr": pr }));
-        self.start_payout(milestone_id)
+        let State::Held { pr, base_sha, head_sha, .. } = m.state else { env::panic_str("milestone is not held") };
+        require!(percent > m.certified_pct && percent <= rules::FULL_PCT, "percent must be above the certified share and at most 100");
+        let part = Part { pr, base_sha, head_sha, pct: percent };
+        let amount = rules::share_to_pay(m.budget_total.0, m.budget.0, percent)
+            .unwrap_or_else(|| env::panic_str("that share pays nothing"));
+        emit("funder_released", json!({ "milestone_id": milestone_id, "pr": pr, "pct": percent }));
+        self.begin_payout(milestone_id, part, amount)
     }
 
     /// Held or Approved back to Funded. The PR can't be used on this milestone again.
@@ -952,11 +998,11 @@ impl Contract {
         };
         let amount = budget + m.fee_remaining.0 + m.fee_refundable.0;
         require!(amount > 0, "nothing to refund");
-        if let State::Approved { pr, head_sha } = &m.state {
+        if let State::Approved { pr, head_sha, .. } = &m.state {
             emit("refund_after_approval", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha }));
         }
-        if let State::Approved { pr, .. } | State::PayoutFailed { pr } = &m.state {
-            self.pr_locks.remove(&pr_key(m.repo_id, *pr));
+        if let Some(pr) = locked_pr(&m.state) {
+            self.pr_locks.remove(&pr_key(m.repo_id, pr));
         }
         let was = m.state.clone();
         let m = self.milestone_mut(milestone_id);
@@ -970,10 +1016,10 @@ impl Contract {
 
     /// Anyone may retry a failed payout.
     pub fn retry_payout(&mut self, milestone_id: u64) -> Promise {
-        let State::PayoutFailed { .. } = self.milestone(milestone_id).state else {
+        let State::PayoutFailed { part, amount } = self.milestone(milestone_id).state.clone() else {
             env::panic_str("payout has not failed");
         };
-        self.start_payout(milestone_id)
+        self.begin_payout(milestone_id, part, amount.0)
     }
 
     #[private]
@@ -982,19 +1028,24 @@ impl Contract {
         let m = self.milestones.get(&milestone_id).cloned().unwrap_or_else(|| env::panic_str("no such milestone"));
         match (kind, ok) {
             (Transfer::Payout, true) => {
-                let State::PayingOut { pr } = m.state else { env::panic_str("not paying out") };
+                let State::PayingOut { part, .. } = m.state else { env::panic_str("not paying out") };
                 self.tokens_held -= amount.0;
                 self.owed -= amount.0;
+                let (pr, pct) = (part.pr, part.pct);
                 self.pr_locks.insert(pr_key(m.repo_id, pr), PrLock::Spent(milestone_id));
+                self.used_prs.insert(used_key(milestone_id, pr));
                 let mm = self.milestone_mut(milestone_id);
-                mm.budget = U128(0);
-                mm.state = State::Paid { pr };
-                emit("milestone_paid", json!({ "milestone_id": milestone_id, "pr": pr, "amount": amount, "to": m.payee.map(|p| p.account) }));
+                mm.budget = U128(mm.budget.0 - amount.0);
+                mm.certified_pct = pct;
+                mm.parts.push(part);
+                // D45: a partial share leaves the rest open for the next PR.
+                mm.state = if pct == rules::FULL_PCT { State::Paid { pr } } else { State::Funded };
+                emit("milestone_paid", json!({ "milestone_id": milestone_id, "pr": pr, "amount": amount, "pct": pct, "to": m.payee.map(|p| p.account) }));
             }
             (Transfer::Payout, false) => {
-                let State::PayingOut { pr } = m.state else { env::panic_str("not paying out") };
-                self.milestone_mut(milestone_id).state = State::PayoutFailed { pr };
-                emit("payout_failed", json!({ "milestone_id": milestone_id, "pr": pr }));
+                let State::PayingOut { part, amount } = m.state else { env::panic_str("not paying out") };
+                emit("payout_failed", json!({ "milestone_id": milestone_id, "pr": part.pr }));
+                self.milestone_mut(milestone_id).state = State::PayoutFailed { part, amount };
             }
             (Transfer::Refund, true) => {
                 self.tokens_held -= amount.0;
@@ -1007,8 +1058,8 @@ impl Contract {
             }
             (Transfer::Refund, false) => {
                 // Put the milestone back as it was, so the funder can try again.
-                if let State::Approved { pr, .. } | State::PayoutFailed { pr } = &was {
-                    self.pr_locks.insert(pr_key(m.repo_id, *pr), PrLock::Locked(milestone_id));
+                if let Some(pr) = locked_pr(&was) {
+                    self.pr_locks.insert(pr_key(m.repo_id, pr), PrLock::Locked(milestone_id));
                 }
                 self.milestone_mut(milestone_id).state = was;
                 emit("refund_failed", json!({ "milestone_id": milestone_id }));
@@ -1071,25 +1122,36 @@ impl Contract {
         emit("claim_refused", json!({ "milestone_id": milestone_id, "pr": pr, "reason": reason, "still_approved": approved }));
     }
 
-    fn hold(&mut self, milestone_id: u64, pr: u64, head_sha: String, merged: bool, reason: String) {
+    fn hold(&mut self, milestone_id: u64, pr: u64, base_sha: String, head_sha: String, merged: bool, reason: String) {
         emit("held", json!({ "milestone_id": milestone_id, "pr": pr, "head_sha": head_sha, "reason": reason }));
-        self.milestone_mut(milestone_id).state = State::Held { pr, head_sha, merged, reason };
+        self.milestone_mut(milestone_id).state = State::Held { pr, base_sha, head_sha, merged, reason };
     }
 
-    fn start_payout(&mut self, milestone_id: u64) -> Promise {
-        let m = self.milestone(milestone_id).clone();
-        let pr = match m.state {
-            State::Checking { pr }
-            | State::Reviewing { pr, .. }
-            | State::Held { pr, .. }
-            | State::PayoutFailed { pr } => pr,
-            _ => env::panic_str("cannot pay out from this state"),
+    /// Both AIs certified `part.pct` (D45). Merged: pay the new share. Open: wait for the
+    /// merge at this head (D36). A share that pays nothing goes to the funder.
+    fn certify(&mut self, milestone_id: u64, part: Part, merged: bool) {
+        let m = self.milestone(milestone_id);
+        let Some(amount) = rules::share_to_pay(m.budget_total.0, m.budget.0, part.pct) else {
+            let reason = format!("no_new_progress:{}", part.pct);
+            self.hold(milestone_id, part.pr, part.base_sha, part.head_sha, merged, reason);
+            return;
         };
+        emit("certified", json!({ "milestone_id": milestone_id, "pr": part.pr, "head_sha": part.head_sha, "pct": part.pct, "merged": merged }));
+        if merged {
+            let _ = self.begin_payout(milestone_id, part, amount);
+        } else {
+            emit("verdict_approved_premerge", json!({ "milestone_id": milestone_id, "pr": part.pr, "head_sha": part.head_sha, "pct": part.pct }));
+            self.milestone_mut(milestone_id).state = State::Approved { pr: part.pr, head_sha: part.head_sha, pct: part.pct };
+        }
+    }
+
+    fn begin_payout(&mut self, milestone_id: u64, part: Part, amount: u128) -> Promise {
+        let m = self.milestone(milestone_id).clone();
         let payee = m.payee.clone().unwrap_or_else(|| env::panic_str("payee is not bound")).account;
         let was = m.state.clone();
-        self.milestone_mut(milestone_id).state = State::PayingOut { pr };
-        emit("payout_started", json!({ "milestone_id": milestone_id, "pr": pr, "to": payee, "amount": m.budget }));
-        self.send(milestone_id, payee, m.budget.0, Transfer::Payout, was)
+        emit("payout_started", json!({ "milestone_id": milestone_id, "pr": part.pr, "pct": part.pct, "to": payee, "amount": U128(amount) }));
+        self.milestone_mut(milestone_id).state = State::PayingOut { part, amount: U128(amount) };
+        self.send(milestone_id, payee, amount, Transfer::Payout, was)
     }
 
     fn send(&self, milestone_id: u64, to: AccountId, amount: u128, kind: Transfer, was: State) -> Promise {

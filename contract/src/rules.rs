@@ -11,6 +11,9 @@ const ETH_IMPLICIT_LEN: usize = 42;
 const SECONDS_PER_DAY: i64 = 86_400;
 const HUMAN: &str = "User";
 const MAX_PROJECT_ID_BYTES: usize = 128;
+pub const FULL_PCT: u8 = 100;
+/// D45: two progress numbers further apart than this are a disagreement, not a difference.
+pub const MAX_PCT_GAP: u8 = 30;
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]
@@ -180,7 +183,8 @@ pub fn after_check(facts: &Facts, approved_head: Option<&str>, diff_cap_bytes: u
 /// One AI's answer, read from its enclave output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiAnswer {
-    Meets,
+    /// `meets` (100) or `partial` (1-99): the share of the whole milestone done (D45).
+    Progress(u8),
     /// `does_not_meet`, `unclear` (D17), `incomplete_diff` (D31) or `too_large`.
     Objects(String),
     /// Error, timeout, bad signature, wrong commit or unreadable: no verdict.
@@ -194,6 +198,7 @@ struct AiOutput {
     role: String,
     head_sha: String,
     verdict: Option<String>,
+    percent_done: Option<u8>,
 }
 
 /// A verdict counts only if the enclave verified the model's signature, it names this
@@ -206,39 +211,57 @@ pub fn read_ai(bytes: &[u8], head_sha: &str, role: &str) -> AiAnswer {
     if out.head_sha != head_sha || out.role != role {
         return AiAnswer::Failed;
     }
-    match (out.status.as_str(), out.verdict.as_deref()) {
-        ("verified", Some("meets")) => AiAnswer::Meets,
-        ("verified", Some(v @ ("does_not_meet" | "unclear"))) => AiAnswer::Objects(v.into()),
+    match (out.status.as_str(), out.verdict.as_deref(), out.percent_done) {
+        // A verdict and its percent must agree (the enclave checks this too).
+        ("verified", Some("meets"), Some(FULL_PCT)) => AiAnswer::Progress(FULL_PCT),
+        ("verified", Some("partial"), Some(p)) if (1..FULL_PCT).contains(&p) => AiAnswer::Progress(p),
+        ("verified", Some(v @ ("does_not_meet" | "unclear")), _) => AiAnswer::Objects(v.into()),
         // Decided in the enclave before any model call, so there's no verdict field.
-        ("too_large", _) => AiAnswer::Objects("too_large".into()),
-        ("incomplete_diff", _) => AiAnswer::Objects("incomplete_diff".into()),
+        ("too_large", _, _) => AiAnswer::Objects("too_large".into()),
+        ("incomplete_diff", _, _) => AiAnswer::Objects("incomplete_diff".into()),
         _ => AiAnswer::Failed,
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewOutcome {
-    BothMeet,
+    /// Both report progress: certify this total share of the milestone (the lower one).
+    Certify(u8),
     /// Which AI objected and how, e.g. `judge:does_not_meet`.
     Held(String),
     /// Neither objected, but at least one gave no verdict: try again (attempt counted).
     Retry,
 }
 
-/// No AI verdict releases money alone: both must say `meets`. Any objection holds,
-/// even when the other AI failed, because the objection is a real verdict.
-pub fn combine(judge: &AiAnswer, verifier: &AiAnswer) -> ReviewOutcome {
+/// No AI verdict releases money alone: both must report progress, and the lower share
+/// counts (D45). Any objection holds, even when the other AI failed, because the objection
+/// is a real verdict. Two shares far apart hold, and so does one that adds nothing.
+pub fn combine(judge: &AiAnswer, verifier: &AiAnswer, certified_pct: u8) -> ReviewOutcome {
     if let AiAnswer::Objects(v) = judge {
         return ReviewOutcome::Held(format!("judge:{v}"));
     }
     if let AiAnswer::Objects(v) = verifier {
         return ReviewOutcome::Held(format!("verifier:{v}"));
     }
-    if *judge == AiAnswer::Meets && *verifier == AiAnswer::Meets {
-        ReviewOutcome::BothMeet
-    } else {
-        ReviewOutcome::Retry
+    let (AiAnswer::Progress(j), AiAnswer::Progress(v)) = (judge, verifier) else {
+        return ReviewOutcome::Retry;
+    };
+    if j.abs_diff(*v) > MAX_PCT_GAP {
+        return ReviewOutcome::Held(format!("disagree:{j}/{v}"));
     }
+    let lower = (*j).min(*v);
+    if lower <= certified_pct {
+        return ReviewOutcome::Held(format!("no_new_progress:{lower}"));
+    }
+    ReviewOutcome::Certify(lower)
+}
+
+/// D45: what to pay when the certified share rises to `new_pct`. Whatever stays in the
+/// milestone is the budget's uncertified share, so rounding never pays more than certified,
+/// and at 100 % exactly the rest goes.
+pub fn share_to_pay(budget_total: u128, remaining: u128, new_pct: u8) -> Option<u128> {
+    let stays = budget_total - budget_total.checked_mul(u128::from(new_pct))? / u128::from(FULL_PCT);
+    remaining.checked_sub(stays).filter(|pay| *pay > 0)
 }
 
 /// The binder's output. `{"error": ...}` fails to parse and refuses.

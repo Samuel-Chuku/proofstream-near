@@ -194,15 +194,36 @@ fn diff_at_the_cap_is_reviewed() {
     assert_eq!(after_check(&facts(false, HEAD, 100), None, 100), AfterCheck::Review);
 }
 
-fn ai(status: &str, role: &str, head: &str, verdict: Option<&str>) -> Vec<u8> {
-    near_sdk::serde_json::json!({ "status": status, "role": role, "head_sha": head, "verdict": verdict })
+fn ai_pct(status: &str, role: &str, head: &str, verdict: Option<&str>, pct: Option<u8>) -> Vec<u8> {
+    near_sdk::serde_json::json!({ "status": status, "role": role, "head_sha": head, "verdict": verdict, "percent_done": pct })
         .to_string()
         .into_bytes()
 }
 
+fn ai(status: &str, role: &str, head: &str, verdict: Option<&str>) -> Vec<u8> {
+    ai_pct(status, role, head, verdict, Some(100))
+}
+
+const MEETS: AiAnswer = AiAnswer::Progress(100);
+
 #[test]
-fn verified_meets_is_meets() {
-    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("meets")), HEAD, "judge"), AiAnswer::Meets);
+fn verified_meets_is_full_progress() {
+    assert_eq!(read_ai(&ai("verified", "judge", HEAD, Some("meets")), HEAD, "judge"), MEETS);
+}
+
+#[test]
+fn verified_partial_is_its_percent() {
+    assert_eq!(read_ai(&ai_pct("verified", "judge", HEAD, Some("partial"), Some(60)), HEAD, "judge"), AiAnswer::Progress(60));
+}
+
+#[test]
+fn a_verdict_that_disagrees_with_its_percent_is_no_verdict() {
+    for (v, p) in [("meets", Some(99)), ("meets", None), ("partial", Some(0)), ("partial", Some(100)), ("partial", None)] {
+        assert_eq!(read_ai(&ai_pct("verified", "judge", HEAD, Some(v), p), HEAD, "judge"), AiAnswer::Failed, "{v} {p:?}");
+    }
+    // Over 255 doesn't parse as a u8 at all.
+    let big = br#"{"status":"verified","role":"judge","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verdict":"partial","percent_done":300}"#;
+    assert_eq!(read_ai(big, HEAD, "judge"), AiAnswer::Failed);
 }
 
 #[test]
@@ -240,19 +261,62 @@ fn unverified_errors_and_garbage_are_no_verdict() {
 }
 
 #[test]
-fn both_must_meet() {
-    assert_eq!(combine(&AiAnswer::Meets, &AiAnswer::Meets), ReviewOutcome::BothMeet);
-    assert_eq!(combine(&AiAnswer::Meets, &AiAnswer::Failed), ReviewOutcome::Retry);
-    assert_eq!(combine(&AiAnswer::Failed, &AiAnswer::Meets), ReviewOutcome::Retry);
-    assert_eq!(combine(&AiAnswer::Failed, &AiAnswer::Failed), ReviewOutcome::Retry);
+fn both_must_report_progress() {
+    assert_eq!(combine(&MEETS, &MEETS, 0), ReviewOutcome::Certify(100));
+    assert_eq!(combine(&MEETS, &AiAnswer::Failed, 0), ReviewOutcome::Retry);
+    assert_eq!(combine(&AiAnswer::Failed, &AiAnswer::Progress(60), 0), ReviewOutcome::Retry);
+    assert_eq!(combine(&AiAnswer::Failed, &AiAnswer::Failed, 0), ReviewOutcome::Retry);
 }
 
 #[test]
 fn any_objection_holds_even_beside_a_failure() {
     let no = AiAnswer::Objects("unclear".into());
-    assert_eq!(combine(&no, &AiAnswer::Meets), ReviewOutcome::Held("judge:unclear".into()));
-    assert_eq!(combine(&AiAnswer::Meets, &no), ReviewOutcome::Held("verifier:unclear".into()));
-    assert_eq!(combine(&AiAnswer::Failed, &no), ReviewOutcome::Held("verifier:unclear".into()));
+    assert_eq!(combine(&no, &MEETS, 0), ReviewOutcome::Held("judge:unclear".into()));
+    assert_eq!(combine(&MEETS, &no, 0), ReviewOutcome::Held("verifier:unclear".into()));
+    assert_eq!(combine(&AiAnswer::Failed, &no, 0), ReviewOutcome::Held("verifier:unclear".into()));
+}
+
+#[test]
+fn the_lower_share_is_certified() {
+    assert_eq!(combine(&AiAnswer::Progress(70), &AiAnswer::Progress(60), 0), ReviewOutcome::Certify(60));
+    assert_eq!(combine(&AiAnswer::Progress(60), &AiAnswer::Progress(70), 0), ReviewOutcome::Certify(60));
+    assert_eq!(combine(&MEETS, &AiAnswer::Progress(90), 40), ReviewOutcome::Certify(90));
+}
+
+#[test]
+fn shares_more_than_30_points_apart_hold() {
+    assert_eq!(combine(&AiAnswer::Progress(90), &AiAnswer::Progress(59), 0), ReviewOutcome::Held("disagree:90/59".into()));
+    assert_eq!(combine(&AiAnswer::Progress(90), &AiAnswer::Progress(60), 0), ReviewOutcome::Certify(60));
+}
+
+#[test]
+fn a_share_that_adds_nothing_holds() {
+    assert_eq!(combine(&AiAnswer::Progress(50), &AiAnswer::Progress(40), 40), ReviewOutcome::Held("no_new_progress:40".into()));
+    assert_eq!(combine(&AiAnswer::Progress(30), &AiAnswer::Progress(35), 40), ReviewOutcome::Held("no_new_progress:30".into()));
+    assert_eq!(combine(&AiAnswer::Progress(50), &AiAnswer::Progress(41), 40), ReviewOutcome::Certify(41));
+}
+
+#[test]
+fn each_payment_is_the_newly_certified_share() {
+    // 60 % of 1000, then up to 100 %.
+    assert_eq!(share_to_pay(1000, 1000, 60), Some(600));
+    assert_eq!(share_to_pay(1000, 400, 100), Some(400));
+    assert_eq!(share_to_pay(1000, 400, 85), Some(250));
+}
+
+#[test]
+fn rounding_never_pays_more_than_certified_and_100_pays_the_rest() {
+    // 33 % of 10 is 3.3: pay 3, keep 7; then 66 % keeps 4 (pay 3); 100 % pays the last 4.
+    assert_eq!(share_to_pay(10, 10, 33), Some(3));
+    assert_eq!(share_to_pay(10, 7, 66), Some(3));
+    assert_eq!(share_to_pay(10, 4, 100), Some(4));
+}
+
+#[test]
+fn a_share_that_pays_nothing_is_refused() {
+    // 1 % of 50 rounds to 0.
+    assert_eq!(share_to_pay(50, 50, 1), None);
+    assert_eq!(share_to_pay(1000, 400, 60), None);
 }
 
 fn binder(owner: u64, contract: &str, milestone: u64, nonce: &str, account: &str) -> Vec<u8> {

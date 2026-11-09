@@ -22,11 +22,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SIGNATURE_ATTEMPTS: u32 = 5;
 const SIGNATURE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-fn fetch_diff(cfg: &Config, token: &str, input: &Input) -> Result<Vec<u8>, &'static str> {
-    let url = format!(
-        "{GITHUB_API}/repos/{}/{}/compare/{}...{}",
-        input.owner, input.repo, input.base_sha, input.head_sha
-    );
+fn fetch_diff(cfg: &Config, token: &str, input: &Input, base_sha: &str, head_sha: &str) -> Result<Vec<u8>, &'static str> {
+    let url = format!("{GITHUB_API}/repos/{}/{}/compare/{base_sha}...{head_sha}", input.owner, input.repo);
     let response = Client::new()
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -198,14 +195,25 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
     let near_ai_key = std::env::var("NEAR_AI_API_KEY").map_err(|_| "missing_near_ai_key")?;
 
     let started = Instant::now();
-    let diff = match fetch_diff(cfg, &github_token, &input) {
+    let too_large = |bytes: Option<usize>| json!({ "status": "too_large", "role": cfg.role, "head_sha": input.head_sha, "diff_bytes": bytes });
+    let diff = match fetch_diff(cfg, &github_token, &input, &input.base_sha, &input.head_sha) {
         Ok(diff) => diff,
-        Err("too_large") => return Ok(json!({ "status": "too_large", "role": cfg.role, "head_sha": input.head_sha })),
+        Err("too_large") => return Ok(too_large(None)),
         Err(code) => return Err(code),
     };
-    if diff.len() > MAX_DIFF_BYTES {
-        return Ok(json!({ "status": "too_large", "role": cfg.role, "head_sha": input.head_sha, "diff_bytes": diff.len() }));
+    // D45: earlier paid PRs, as context. Their size counts toward the same cap.
+    let mut paid = Vec::new();
+    for part in &input.prior {
+        match fetch_diff(cfg, &github_token, &input, &part.base_sha, &part.head_sha) {
+            Ok(bytes) => paid.extend_from_slice(&bytes),
+            Err("too_large") => return Ok(too_large(None)),
+            Err(code) => return Err(code),
+        }
     }
+    if paid.len() + diff.len() > MAX_DIFF_BYTES {
+        return Ok(too_large(Some(paid.len() + diff.len())));
+    }
+    let paid_text = std::str::from_utf8(&paid).map_err(|_| "diff_not_utf8")?;
     let diff_text = std::str::from_utf8(&diff).map_err(|_| "diff_not_utf8")?;
     if !rules::diff_complete(diff_text, input.changed_files) {
         return Ok(json!({
@@ -218,7 +226,7 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
     }
     let fetch_ms = started.elapsed().as_millis() as u64;
 
-    let request = rules::request_body(cfg, &input, diff_text);
+    let request = rules::request_body(cfg, &input, paid_text, diff_text);
     let model_started = Instant::now();
     let response = complete(cfg, &near_ai_key, &request)?;
     let model_ms = model_started.elapsed().as_millis() as u64;
@@ -238,7 +246,7 @@ pub fn run(stdin: &str) -> Result<Value, &'static str> {
         chat_id: &chat_id,
         request_sha256: verify::sha256_hex(&request),
         response_sha256: verify::sha256_hex(&response),
-        diff_bytes: diff.len(),
+        diff_bytes: paid.len() + diff.len(),
         ms: [fetch_ms, model_ms, signature_ms],
     }))
 }

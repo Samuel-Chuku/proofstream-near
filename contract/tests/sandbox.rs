@@ -204,8 +204,12 @@ async fn claim(env: &Env, id: u64, checker_out: Value) -> ExecutionFinalResult {
         .deposit(NearToken::from_millinear(50)).gas(MAX_GAS).transact().await.unwrap()
 }
 
+fn ai_pct(role: &str, verdict: &str, head: &str, pct: u8) -> Value {
+    output(json!({ "status": "verified", "role": role, "head_sha": head, "verdict": verdict, "percent_done": pct }))
+}
+
 fn ai(role: &str, verdict: &str, head: &str) -> Value {
-    output(json!({ "status": "verified", "role": role, "head_sha": head, "verdict": verdict }))
+    ai_pct(role, verdict, head, 100)
 }
 
 async fn review(env: &Env, id: u64, judge: Value, verifier: Value) -> ExecutionFinalResult {
@@ -366,12 +370,26 @@ async fn one_objection_holds_and_the_funder_can_release() {
     assert_eq!(state(&env, id).await, "Held");
     assert_eq!(balance(&env, env.payee.id().as_str()).await, 0);
 
-    let stranger = env.relayer.call(env.ps.id(), "funder_release").args_json(json!({ "milestone_id": id })).gas(MAX_GAS).transact().await.unwrap();
+    let stranger = env.relayer.call(env.ps.id(), "funder_release").args_json(json!({ "milestone_id": id, "percent": 100 })).gas(MAX_GAS).transact().await.unwrap();
     assert!(stranger.is_failure(), "only the funder releases");
 
-    pass(env.funder.call(env.ps.id(), "funder_release").args_json(json!({ "milestone_id": id })).gas(MAX_GAS).transact().await.unwrap(), "release");
+    pass(env.funder.call(env.ps.id(), "funder_release").args_json(json!({ "milestone_id": id, "percent": 100 })).gas(MAX_GAS).transact().await.unwrap(), "release");
     assert_eq!(state(&env, id).await, "Paid");
     assert_eq!(balance(&env, env.payee.id().as_str()).await, BUDGET);
+    assert_reconciles(&env).await;
+}
+
+#[tokio::test]
+async fn a_partial_review_pays_the_lower_share_through_the_real_token() {
+    let env = setup().await;
+    let id = ready(&env).await;
+    pass(claim(&env, id, checker(true, HEAD)).await, "claim");
+    pass(review(&env, id, ai_pct("judge", "partial", HEAD, 70), ai_pct("verifier", "partial", HEAD, 60)).await, "review");
+    assert_eq!(state(&env, id).await, "Funded");
+    assert_eq!(balance(&env, env.payee.id().as_str()).await, BUDGET * 60 / 100);
+    let m = milestone(&env, id).await;
+    assert_eq!(m["certified_pct"], 60);
+    assert_eq!(m["budget"], (BUDGET - BUDGET * 60 / 100).to_string());
     assert_reconciles(&env).await;
 }
 
