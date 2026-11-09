@@ -36,7 +36,16 @@ Then on the VPS:
 cd proofstream-near/relayer
 # Compose mounts file secrets with their host owner and mode; uid 1000 is the container's `node` user.
 sudo chown 1000:1000 secrets/relayer_key.json && sudo chmod 600 secrets/relayer_key.json
-cp .env.example .env   # fill in ALLOWED_ORIGIN (the front end's Cloudflare Pages origin) and RELAYER_DOMAIN
+cp .env.example .env   # then fill in all four values
+```
+
+The values for the hosted ProofStream relayer:
+
+```bash
+RELAYER_ACCOUNT_ID=proofstream-relayer.testnet
+ALLOWED_ORIGIN=https://near.proofstream.site
+RELAYER_DOMAIN=relayer.proofstream.site
+DAILY_CAP_MILLINEAR=2000
 ```
 
 ## Run
