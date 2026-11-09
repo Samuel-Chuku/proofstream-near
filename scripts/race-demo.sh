@@ -3,7 +3,7 @@
 # Needs curl and jq. Usage: scripts/race-demo.sh [winner_tx winner_signer loser_tx loser_signer]
 set -euo pipefail
 
-RPC=${NEAR_RPC:-https://rpc.testnet.near.org}
+RPC=${NEAR_RPC:-https://archival-rpc.testnet.near.org}
 WINNER_TX=${1:-EhV5kyS1QREmsdPaqVCkmE8ZxfQpSfWmijyVQd4GqAJp}
 WINNER_SIGNER=${2:-proofstream-contributor.testnet}
 LOSER_TX=${3:-GUt5pkjUzb2FoeCYMsMPghVecpqYSwTjdChiiTXiSc61}

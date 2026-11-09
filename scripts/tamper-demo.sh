@@ -8,7 +8,7 @@
 # Add --tests to also run the signature tests locally (needs Rust; no keys).
 set -euo pipefail
 
-RPC=${NEAR_RPC:-https://rpc.testnet.near.org}
+RPC=${NEAR_RPC:-https://archival-rpc.testnet.near.org}
 SENDER=proofstream-checker-owner.testnet
 HONEST_TX=9hrsYmttmdg6QGMtnvXLA5zsNi1ysmuWvhijL7m6zGGV
 FORGED_TX=9F76frZeVEJyHFU53V6iXNVmCgsGKeRHEZMbaFPNMW5H
