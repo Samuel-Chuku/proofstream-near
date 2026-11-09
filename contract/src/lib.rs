@@ -65,8 +65,9 @@ const MAX_RESULT_BYTES: usize = 1024;
 const MAX_FT_RESULT_BYTES: usize = 64;
 
 // Milestone limits.
-const DEFAULT_MAX_PAID_ATTEMPTS: u32 = 3;
-const MAX_PAID_ATTEMPTS_LIMIT: u32 = 10;
+/// Shared by every PR of the milestone (D45), so several partial PRs need room to retry.
+const DEFAULT_MAX_PAID_ATTEMPTS: u32 = 10;
+const MAX_PAID_ATTEMPTS_LIMIT: u32 = 25;
 const DEFAULT_DIFF_CAP_BYTES: u64 = 100_000;
 /// The judge's own `MAX_DIFF_BYTES`: a larger cap could never be reviewed.
 const MAX_DIFF_CAP_BYTES: u64 = 180_000;

@@ -14,7 +14,8 @@ const NOW_S: u64 = 1_793_900_000; // 2026-11-05
 const MERGED_AT: &str = "2026-11-06T12:00:00Z";
 const BUDGET: u128 = 10_000_000;
 const FEE: u128 = 20_000;
-const FEE_BUDGET: u128 = 60_000;
+// Enough for every default attempt.
+const FEE_BUDGET: u128 = FEE * DEFAULT_MAX_PAID_ATTEMPTS as u128;
 const MIN_DEADLINE_S: u64 = 600;
 const DEADLINE_S: u64 = NOW_S + 3_600;
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1244,4 +1245,20 @@ fn a_failed_partial_payout_retries_the_same_share() {
     let _ = c.retry_payout(id);
     assert!(matches!(state(&c, id), State::PayingOut { amount, .. } if amount == U128(pct_of(60))));
     assert_reconciles(&c);
+}
+
+#[test]
+fn review_attempts_default_to_10_and_go_up_to_25() {
+    let mut c = new_contract();
+    let id = create(&mut c, params());
+    assert_eq!(c.get_milestone(id).unwrap().max_paid_attempts, 10);
+    let id = create(&mut c, CreateMilestone { max_paid_attempts: Some(25), ..params() });
+    assert_eq!(c.get_milestone(id).unwrap().max_paid_attempts, 25);
+}
+
+#[test]
+#[should_panic(expected = "max_paid_attempts out of range")]
+fn more_than_25_review_attempts_are_refused() {
+    let mut c = new_contract();
+    create(&mut c, CreateMilestone { max_paid_attempts: Some(26), ..params() });
 }
