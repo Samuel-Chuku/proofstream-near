@@ -1,0 +1,17 @@
+/* The two faces of the ProofStream system, set the way the Arc site's next/font does:
+   tokens.css reads --font-display and --font-mono and never names a face itself.
+   Silkscreen 700 comes from Google Fonts (linked in each page's <head>);
+   Departure Mono is self-hosted, SIL OFL 1.1, licence beside the file. */
+
+@font-face {
+  font-family: 'Departure Mono';
+  src: url('./fonts/DepartureMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-display: 'Silkscreen';
+  --font-mono: 'Departure Mono';
+}

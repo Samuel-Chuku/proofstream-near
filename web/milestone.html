@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Milestone · ProofStream</title>
+<meta name="description" content="One milestone: its state, every stage with its transaction, and both verdicts.">
+<link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@700&display=swap">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<body>
+<main>
+  <section id="pick" hidden>
+    <h1 class="ps-display-l">Milestones</h1>
+    <ul class="ps-feed" id="list"></ul>
+  </section>
+  <section id="view" hidden>
+    <header class="ps-masthead">
+      <div>
+        <p class="ps-caption" id="crumb"></p>
+        <h1 class="ps-display-l" id="title"></h1>
+        <div class="ps-masthead-meta ps-caption" id="meta"></div>
+      </div>
+      <div id="state-badge"></div>
+    </header>
+    <div id="notice"></div>
+    <section class="ps-panel">
+      <div class="ps-actions"><span id="paid"></span><span class="ps-caption">released of</span><span id="total"></span></div>
+      <div class="ps-bar" id="bar" role="img"></div>
+      <div class="ps-bar-legend ps-caption">
+        <span><span class="ps-swatch ps-fill-unlocked"></span>released</span>
+        <span><span class="ps-swatch ps-fill-locked"></span>locked in escrow</span>
+      </div>
+    </section>
+    <p class="ps-body" id="text"></p>
+    <div class="ps-actions" id="actions"></div>
+    <div class="ps-section-rule"><h2 class="ps-label">Details</h2></div>
+    <dl class="ps-sheet" id="sheet"></dl>
+    <div class="ps-section-rule"><h2 class="ps-label">Log</h2></div>
+    <p class="ps-detail" id="log-status">Reading the contract's transactions…</p>
+    <ul class="ps-feed" id="log"></ul>
+    <div class="ps-section-rule" id="funder-rule" hidden><h2 class="ps-label">Funder</h2></div>
+    <section id="funder" hidden></section>
+  </section>
+</main>
+<script type="module" src="js/milestone.mjs"></script>
+</body>
+</html>

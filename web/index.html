@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProofStream on NEAR</title>
+<meta name="description" content="Milestone payouts for open-source work, released by verified facts and two independent AI reviews.">
+<link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@700&display=swap">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<main>
+  <header class="ps-masthead">
+    <div>
+      <p class="ps-caption">NEAR TESTNET · <span id="count">…</span></p>
+      <h1 class="ps-display-xl">Milestones that verify themselves</h1>
+    </div>
+  </header>
+
+  <p class="ps-body">A funder escrows USDC against one milestone of a GitHub repository. The contributor is paid when a merged pull request passes the <strong>hard facts</strong>, checked in an Intel TDX enclave, and <strong>two AI reviewers</strong> from different vendors certify how much of the milestone it completes. The contract pays the <strong>lower</strong> of the two shares. No AI verdict moves money on its own.</p>
+  <p class="ps-body">The judge buys its second opinion from the verifier and passes it on. The verifier signs its verdict with a key that only exists inside its enclave, and the contract checks that signature itself.</p>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Start here</h2></div>
+  <div class="ps-tiles">
+    <section class="ps-panel ps-tile">
+      <p class="ps-label">Funder</p>
+      <p class="ps-detail">Escrow a budget against a milestone. Needs a NEAR testnet wallet and test USDC.</p>
+      <div class="ps-actions"><a class="ps-button" href="new.html">New milestone</a></div>
+    </section>
+    <section class="ps-panel ps-tile">
+      <p class="ps-label">Anyone</p>
+      <p class="ps-detail">See a milestone's state, every stage with its transaction, and both verdicts.</p>
+      <form class="ps-actions" action="milestone.html">
+        <label class="ps-caption" for="open-id">Milestone #</label>
+        <input id="open-id" name="id" inputmode="numeric" pattern="[0-9]+" required class="ps-input ps-input-short">
+        <button class="ps-button" type="submit">Open</button>
+      </form>
+    </section>
+    <section class="ps-panel ps-tile">
+      <p class="ps-label">Contributor</p>
+      <p class="ps-detail">Bind a payout account and claim with your merged PR. No NEAR needed; the relayer sends it.</p>
+      <div class="ps-actions"><a class="ps-button" href="claim.html">Claim</a></div>
+    </section>
+  </div>
+
+  <div class="ps-section-rule"><h2 class="ps-label">How a milestone pays</h2></div>
+  <ol class="ps-numbered ps-detail">
+    <li><strong>Fund.</strong> The funder pins the repo by its numeric GitHub id, the contributor's GitHub id, the CI checks, a deadline, and the exact wasm hash of every enclave program, then sends the budget plus the review fee.</li>
+    <li><strong>Bind.</strong> The contributor posts a public gist naming a NEAR account. An enclave checks the gist belongs to the milestone's GitHub id; from then on money can only go there.</li>
+    <li><strong>Claim.</strong> The checker reads GitHub inside TDX: merged, right repo and branch, right author, checks passed, nothing under <code>.github/</code>, the complete file list, an independent approval.</li>
+    <li><strong>Review.</strong> The judge (GLM) and the verifier (Qwen) each report what share of the milestone is done. Their models' signatures are checked in the enclave; the verifier's verdict is signed again, by its own key.</li>
+    <li><strong>Pay.</strong> The lower share is paid. More than 30 points apart, any objection, or no new progress: the money waits for the funder. After the deadline, the funder takes back what was never certified.</li>
+  </ol>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Check it yourself</h2></div>
+  <p class="ps-body">Every claim in the <a href="https://github.com/Samuel-Chuku/proofstream-near#claims-and-how-to-check-them">README</a> comes with a command. <code>scripts/verify-execution.py &lt;tx&gt;</code> checks any review's TDX attestation off-chain, down to Intel's signature.</p>
+</main>
+<script type="module">
+  import { shell } from './js/ui.mjs';
+  import { nextMilestoneId } from './js/chain.mjs';
+  shell('home');
+  nextMilestoneId().then((n) => { document.getElementById('count').textContent = `${n} MILESTONE${n === 1 ? '' : 'S'} ON proofstream-v1.testnet`; })
+    .catch(() => { document.getElementById('count').textContent = 'proofstream-v1.testnet'; });
+</script>
+</body>
+</html>

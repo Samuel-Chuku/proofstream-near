@@ -1,0 +1,254 @@
+/* ============================================================
+   ProofStream — design tokens
+   Never hardcode a value that exists here. Never add a token to
+   a component file.
+
+   TWO PALETTES, ONE SYSTEM. Dark is a designed second artifact,
+   not an inversion filter: every law still holds. The 4px grid,
+   the hard down-right shadow, radius 0, and above all the green
+   law — #00FF00 is unlocked USDC and nothing else — are
+   identical in both. Only the ground and the ink change.
+   ============================================================ */
+
+:root {
+  /* ---- Ground & surface ---------------------------------- */
+  --ps-paper:        #EFEDE3;  /* page */
+  --ps-surface:      #F0F0F0;  /* raised panel */
+  --ps-sunk:         #E3E1D7;  /* wells, input interiors, unaccrued cells */
+
+  /* ---- Structure ----------------------------------------- */
+  --ps-border:       #CCCCCC;  /* hairline, non-structural dividers */
+  --ps-rule:         #333333;  /* structural border + every shadow */
+
+  /* ---- Ink ------------------------------------------------ */
+  --ps-ink:          #333333;
+  --ps-ink-dim:      #666666;
+  --ps-ink-faint:    #999999;
+
+  /* ---- The green -----------------------------------------
+     Unlocked USDC only. Never a button, never a link, never
+     "success". As a FILL on light; as TEXT only on invert.   */
+  --ps-green:        #00FF00;
+  --ps-green-deep:   #00CC00;  /* border on a green fill, focus ring */
+
+  /* Text ON a green fill. Green is bright in BOTH palettes, so
+     this stays dark in both — it deliberately does not follow
+     --ps-ink, which flips. */
+  --ps-on-green:     #333333;
+
+  /* ---- Invert (alerts, policy reverts) --------------------
+     Defined by being tonally opposite to the page, which is why
+     it flips with the palette rather than staying dark.      */
+  --ps-invert-bg:    #333333;
+  --ps-invert-ink:   #EFEDE3;
+
+  /* ---- Fill states ---------------------------------------
+     The four states every quantity of money can be in.
+     Dither carries meaning; it is not texture.               */
+  --ps-dither-50:
+    repeating-conic-gradient(
+      var(--ps-ink-faint) 0% 25%,
+      transparent 0% 50%
+    ) 0 0 / 4px 4px;                       /* LOCKED: accrued, unverified */
+
+  --ps-dither-25:
+    radial-gradient(var(--ps-ink-faint) 1px, transparent 1px)
+      0 0 / 4px 4px;                       /* PENDING / indeterminate */
+
+  --ps-hatch:
+    repeating-linear-gradient(
+      45deg,
+      var(--ps-ink) 0 1px,
+      transparent 1px 4px
+    );                                     /* BLOCKED: policy revert */
+
+  /* ---- Shadow: hard, down-right, single source ------------ */
+  --ps-shadow-1: 2px 2px 0 0 var(--ps-rule);
+  --ps-shadow-2: 4px 4px 0 0 var(--ps-rule);
+  --ps-shadow-3: 6px 6px 0 0 var(--ps-rule);
+  --ps-shadow-pressed: 0 0 0 0 var(--ps-rule);
+
+  /* ---- Space: 4px grid, no exceptions --------------------- */
+  --ps-1:  4px;
+  --ps-2:  8px;
+  --ps-3: 16px;
+  --ps-4: 24px;
+  --ps-5: 32px;
+  --ps-6: 48px;
+  --ps-7: 64px;
+
+  /* ---- Radius: structural is 0; chips only get 4 ---------- */
+  --ps-r-0: 0px;
+  --ps-r-1: 4px;
+
+  /* ---- Border widths -------------------------------------- */
+  --ps-bw-hair:   1px;
+  --ps-bw-struct: 2px;
+
+  /* ---- Type ------------------------------------------------ */
+  /* next/font hashes the real family names and exposes them as these
+     variables, set on <html> in layout.tsx. Do not name the faces directly
+     here — that silently falls back to a system font in production. */
+  --ps-display: var(--font-display), ui-monospace, monospace;
+  --ps-mono: var(--font-mono), ui-monospace, monospace;
+
+  /* Scaled up for readability at the human's request. Line heights stay on
+     the 4px grid, and sizes stay whole pixels so the pixel faces keep their
+     crisp edges — fractional scaling is what makes bitmap-derived outlines
+     go mushy. */
+  --ps-size-display-xl: 48px;  --ps-lh-display-xl: 48px;
+  --ps-size-display-l:  32px;  --ps-lh-display-l:  36px;
+  --ps-size-data-xl:    40px;  --ps-lh-data-xl:    44px;
+  --ps-size-data-m:     18px;  --ps-lh-data-m:     24px;
+  --ps-size-body:       16px;  --ps-lh-body:       28px;
+  /* Dense reading: the agents' verbatim reasoning. Smaller than body because
+     a verdict card carries several paragraphs of machine output and body size
+     turns them into a wall. Line height stays on the 4px grid. */
+  --ps-size-detail:     14px;  --ps-lh-detail:     24px;
+  /* Chrome and previews: navigation, the verdict scan line. Below everything
+     the page itself says, so it never competes with content. */
+  --ps-size-nav:        12px;  --ps-lh-nav:        16px;
+  /* Section headings sitting on the dashed rule. Set in the DISPLAY face:
+     Departure Mono ships a single weight, so there is no bold to reach for —
+     the heavier face is what separates a heading from body text. */
+  --ps-size-section:    16px;  --ps-lh-section:    24px;
+  --ps-size-label:      13px;  --ps-lh-label:      20px;
+
+  --ps-track-label: 1px;  /* letter-spacing on caps labels */
+
+  /* ---- Page ------------------------------------------------ */
+  --ps-page-max: 1200px;
+
+  /* ---- Stream bar geometry -------------------------------- */
+  /* Larger so the hero actually reads as the hero. Still one cell = one USDC
+     and still countable, which is the only thing that must not change. */
+  --ps-cell-w:   20px;
+  --ps-cell-h:   36px;
+  --ps-cell-gap:  4px;
+  --ps-cell-max:  60;   /* above this, one cell = a computed unit */
+
+  /* ---- Motion: discrete, never eased ---------------------- */
+  --ps-step-fast: steps(4, end);
+  --ps-step-bar:  steps(8, end);
+  --ps-dur-flash: 120ms;
+  --ps-dur-state: 240ms;
+  --ps-dur-cell:   40ms;  /* per cell, left to right */
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   DARK
+   The light source still comes from the top-left, so a shadow
+   must still be DARKER than its ground — on dark that means
+   pure black, not a lightened edge. Getting this backwards is
+   what makes a naive dark mode look flat: the shadow language
+   silently stops working while every other rule still holds.
+   ============================================================ */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --ps-paper:      #1A1917;  /* warm-neutral, echoing the paper it replaces */
+    --ps-surface:    #232320;  /* raised */
+    --ps-sunk:       #111110;  /* wells recede below the page */
+
+    --ps-border:     #3A3A36;
+    --ps-rule:       #000000;
+
+    --ps-ink:        #EFEDE3;
+    --ps-ink-dim:    #A8A69C;
+    --ps-ink-faint:  #6E6C64;
+
+    /* Green is unchanged — it is a claim about the chain, not a
+       style. It reads at 9.2:1 on this ground. */
+
+    --ps-invert-bg:  #EFEDE3;
+    --ps-invert-ink: #1A1917;
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --ps-paper:      #1A1917;
+  --ps-surface:    #232320;
+  --ps-sunk:       #111110;
+
+  --ps-border:     #3A3A36;
+  --ps-rule:       #000000;
+
+  --ps-ink:        #EFEDE3;
+  --ps-ink-dim:    #A8A69C;
+  --ps-ink-faint:  #6E6C64;
+
+  --ps-invert-bg:  #EFEDE3;
+  --ps-invert-ink: #1A1917;
+
+  color-scheme: dark;
+}
+
+/* ============================================================
+   Global resets specific to this system
+   ============================================================ */
+
+* {
+  image-rendering: pixelated;
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+}
+
+body {
+  background: var(--ps-paper);
+  color: var(--ps-ink);
+  font-family: var(--ps-mono);
+  font-size: var(--ps-size-body);
+  line-height: var(--ps-lh-body);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Every figure is tabular. A ticking balance must not jitter. */
+.ps-num,
+input[type='number'],
+table {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Focus: green is allowed here because it is a ring, not a fill,
+   and it reads as the system's one active signal. */
+:focus-visible {
+  outline: var(--ps-bw-struct) solid var(--ps-green-deep);
+  outline-offset: var(--ps-bw-struct);
+}
+
+/* ============================================================
+   Fill-state utility classes — use these, don't re-derive
+   ============================================================ */
+
+.ps-fill-unaccrued { background: var(--ps-sunk); }
+.ps-fill-locked    { background: var(--ps-dither-50); }
+/* Both agents valued this work, but the per-certification cap has not let the
+   agent certify it yet. The dither says "spoken for, not yet released" — the
+   same language the funding meter uses — and the green edge says which side of
+   the argument it is on. Dither alone read as an empty cell; the edge alone
+   read as an empty box. It needs both. */
+.ps-fill-valued    { background: var(--ps-dither-25); box-shadow: inset 0 0 0 2px var(--ps-green-deep); }
+.ps-fill-unlocked  { background: var(--ps-green); color: var(--ps-on-green); }
+.ps-fill-blocked   {
+  background: var(--ps-hatch);
+  box-shadow: inset 0 0 0 var(--ps-bw-struct) var(--ps-rule);
+}
+
+/* ============================================================
+   Reduced motion — kill animation, keep state legibility
+   ============================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

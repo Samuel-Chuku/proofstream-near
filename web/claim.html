@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claim · ProofStream</title>
+<meta name="description" content="Bind a payout account and claim a milestone with your merged pull request. No NEAR needed.">
+<link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@700&display=swap">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<body>
+<main>
+  <header class="ps-masthead">
+    <div>
+      <p class="ps-caption" id="crumb">CONTRIBUTOR</p>
+      <h1 class="ps-display-l">Claim a milestone</h1>
+      <p class="ps-detail">No wallet and no NEAR needed: the relayer sends each step, and it can only send what the contract would accept.</p>
+    </div>
+  </header>
+  <form class="ps-actions" id="pick" hidden>
+    <label class="ps-caption" for="pick-id">Milestone #</label>
+    <input class="ps-input ps-input-short" id="pick-id" name="id" inputmode="numeric" pattern="[0-9]+" required>
+    <button class="ps-button" type="submit">Continue</button>
+  </form>
+  <section id="flow" hidden>
+    <dl class="ps-sheet" id="summary"></dl>
+    <ol class="ps-steps">
+      <li class="ps-step" id="step-bind"><div class="ps-step-body"><p class="ps-label">Bind your payout account</p><div id="bind"></div></div></li>
+      <li class="ps-step" id="step-claim"><div class="ps-step-body"><p class="ps-label">Claim with your merged PR</p><div id="claim"></div></div></li>
+      <li class="ps-step" id="step-review"><div class="ps-step-body"><p class="ps-label">Review by two AIs</p><div id="review"></div></div></li>
+    </ol>
+    <p class="ps-detail"><a id="view-link" href="#">See this milestone's full log</a></p>
+  </section>
+</main>
+<script type="module" src="js/claim.mjs"></script>
+</body>
+</html>
