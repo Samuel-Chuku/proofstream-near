@@ -1,0 +1,35 @@
+[
+  {
+    "project": "ai-review",
+    "commit": "068742e0df1841894dcf0c6daa8ccd8c1f99b81f",
+    "image": "outlayer/wasmedge-compiler@sha256:d9eb7bd9bab6c46b77f309ec33e94ca112883268a848dd1929289fade799cd27",
+    "builder": "out-layer/outlayer@9dc70c10453e642233416ba38e16e3b35664be18:scripts/build_github_wasm.sh",
+    "target": "wasm32-wasip2",
+    "sha256": "1f5898785e4a02cecfd7bf46c5c87c7cd814271def28b739dabbfc8c863eae0b"
+  },
+  {
+    "project": "binder",
+    "commit": "068742e0df1841894dcf0c6daa8ccd8c1f99b81f",
+    "image": "outlayer/wasmedge-compiler@sha256:d9eb7bd9bab6c46b77f309ec33e94ca112883268a848dd1929289fade799cd27",
+    "builder": "out-layer/outlayer@9dc70c10453e642233416ba38e16e3b35664be18:scripts/build_github_wasm.sh",
+    "target": "wasm32-wasip2",
+    "sha256": "5b50c0126992e39a6ebe7debe413688cd65806a089c3db881abd0f28f527e29c"
+  },
+  {
+    "project": "checker",
+    "commit": "068742e0df1841894dcf0c6daa8ccd8c1f99b81f",
+    "image": "outlayer/wasmedge-compiler@sha256:d9eb7bd9bab6c46b77f309ec33e94ca112883268a848dd1929289fade799cd27",
+    "builder": "out-layer/outlayer@9dc70c10453e642233416ba38e16e3b35664be18:scripts/build_github_wasm.sh",
+    "target": "wasm32-wasip2",
+    "sha256": "ce43f8494d7786420f7db11989849626c3ad38bbd40de161c6c6afc80bcf6028"
+  },
+  {
+    "project": "contract",
+    "commit": "068742e0df1841894dcf0c6daa8ccd8c1f99b81f",
+    "image": "sourcescan/cargo-near@sha256:c9655eaf7436b90c87ea8b25739f91063032c5c30ba24cfeafe72c142943b5bb",
+    "builder": "cargo-near 0.23.0 build reproducible-wasm",
+    "target": "wasm32-unknown-unknown",
+    "sha256": "1a8c7ef86e32757235cb8e58f3619660e7985c81800930e6d2db94a0d83fb84b",
+    "code_hash": "2ndrctmSgvH8gJz1XFQzrYVCEVWMy12ffWK9RwNy68nv"
+  }
+]

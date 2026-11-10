@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" shape-rendering="crispEdges" role="img" aria-label="ProofStream">
+  <!-- Solid fills only, no outlines: the 2px strokes on the full mark close up
+       to mush at 16px. The two locked bars are drawn in ink, and the browser's
+       own theme decides which ink — a #333 bar is invisible on a dark tab strip,
+       which is where this icon spends most of its life. SVG favicons honour an
+       embedded stylesheet, so this needs no second file. -->
+  <style>
+    .ink { fill: #333333 }
+    @media (prefers-color-scheme: dark) { .ink { fill: #EFEDE3 } }
+  </style>
+  <rect x="24" y="48" width="34" height="10" fill="#00FF00"/>
+  <rect x="18" y="34" width="34" height="10" fill="#00FF00"/>
+  <rect x="12" y="20" width="34" height="10" class="ink"/>
+  <rect x="6" y="6" width="34" height="10" class="ink"/>
+</svg>

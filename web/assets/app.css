@@ -1,0 +1,145 @@
+/* ============================================================
+   ProofStream on NEAR — the same printed ledger sheet as the Arc
+   site. Components carried over from Proof-Stream/web/app/globals.css;
+   every value comes from tokens.css. Radius 0 except chips, hard
+   down-right shadows, 4px grid, and green only for released USDC.
+   ============================================================ */
+
+* { box-sizing: border-box; }
+html, body { overflow-x: clip; }
+body { margin: 0; min-height: 100dvh; display: flex; flex-direction: column; }
+main, .ps-page { width: 100%; max-width: var(--ps-page-max); margin: 0 auto; padding: var(--ps-5) var(--ps-6) var(--ps-7); }
+main { flex: 1; }
+a { color: inherit; text-underline-offset: 2px; }
+[hidden] { display: none !important; }
+
+/* ---- Type roles ------------------------------------------ */
+.ps-display-xl, .ps-display-l { font-family: var(--ps-display); font-weight: 700; text-transform: uppercase; margin: 0; }
+.ps-display-xl { font-size: var(--ps-size-display-xl); line-height: var(--ps-lh-display-xl); }
+.ps-display-l { font-size: var(--ps-size-display-l); line-height: var(--ps-lh-display-l); }
+.ps-label { font-size: var(--ps-size-label); line-height: var(--ps-lh-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; margin: 0; }
+.ps-caption { font-size: var(--ps-size-label); line-height: var(--ps-lh-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; color: var(--ps-ink-dim); margin: 0; }
+.ps-body { font-size: var(--ps-size-body); line-height: var(--ps-lh-body); max-width: 72ch; text-transform: none; margin: 0 0 var(--ps-3); }
+.ps-detail { font-size: var(--ps-size-detail); line-height: var(--ps-lh-detail); color: var(--ps-ink-dim); text-transform: none; margin: 0; }
+.ps-mono-id { font-size: var(--ps-size-detail); line-height: var(--ps-lh-detail); overflow-wrap: anywhere; }
+
+/* ---- Amount ---------------------------------------------- */
+.ps-amount { white-space: nowrap; }
+.ps-amount-whole { color: var(--ps-ink); }
+.ps-amount-fraction { color: var(--ps-ink-dim); font-size: 0.7em; }
+.ps-amount-suffix { color: var(--ps-ink-dim); font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); margin-left: var(--ps-2); }
+.ps-amount-xl { font-size: var(--ps-size-data-xl); line-height: var(--ps-lh-data-xl); }
+.ps-amount-m { font-size: var(--ps-size-data-m); line-height: var(--ps-lh-data-m); }
+
+/* ---- Masthead and section rule --------------------------- */
+.ps-masthead { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--ps-4); margin-bottom: var(--ps-5); }
+.ps-masthead-meta { display: flex; flex-wrap: wrap; gap: var(--ps-2) var(--ps-3); margin-top: var(--ps-2); color: var(--ps-ink-dim); }
+.ps-section-rule { display: flex; align-items: center; gap: var(--ps-2); margin: var(--ps-6) 0 var(--ps-4); }
+.ps-section-rule > .ps-label { font-family: var(--ps-display); font-size: var(--ps-size-section); line-height: var(--ps-lh-section); color: var(--ps-ink); letter-spacing: 0; }
+.ps-section-rule::after { content: ''; flex: 1; border-top: var(--ps-bw-hair) dashed var(--ps-border); }
+
+/* ---- Primitives ------------------------------------------ */
+.ps-button { font: inherit; font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; padding: 12px 20px; background: var(--ps-surface); color: var(--ps-ink); border: var(--ps-bw-struct) solid var(--ps-rule); border-radius: var(--ps-r-0); box-shadow: var(--ps-shadow-2); cursor: pointer; text-decoration: none; display: inline-block; }
+.ps-button:hover:not(:disabled) { border-color: var(--ps-green-deep); }
+.ps-button:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: var(--ps-shadow-pressed); }
+.ps-button:disabled { color: var(--ps-ink-faint); border-color: var(--ps-ink-faint); box-shadow: none; cursor: not-allowed; }
+/* Green ground ONLY on a button that releases USDC. */
+.ps-button-primary { background: var(--ps-green); color: var(--ps-on-green); }
+.ps-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ps-3); }
+
+.ps-input { font: inherit; font-size: var(--ps-size-data-m); line-height: var(--ps-lh-data-m); padding: 12px; width: 100%; background: var(--ps-sunk); color: var(--ps-ink); border: var(--ps-bw-struct) solid var(--ps-rule); border-radius: var(--ps-r-0); }
+textarea.ps-input { font-size: var(--ps-size-body); line-height: var(--ps-lh-body); resize: vertical; }
+.ps-check { display: flex; align-items: center; gap: var(--ps-2); }
+.ps-check input { width: var(--ps-3); height: var(--ps-3); accent-color: var(--ps-ink); }
+
+.ps-chip { display: inline-flex; align-items: center; gap: var(--ps-1); font-family: inherit; font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); padding: var(--ps-1) var(--ps-2); border: var(--ps-bw-hair) solid var(--ps-border); border-radius: var(--ps-r-1); background: none; color: inherit; cursor: pointer; text-decoration: none; }
+.ps-chip-copied { background: var(--ps-invert-bg); color: var(--ps-invert-ink); }
+.ps-chip-current { border-color: var(--ps-rule); background: var(--ps-surface); box-shadow: var(--ps-shadow-1); cursor: default; }
+.ps-chip-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--ps-1); }
+
+/* A raised sheet: the one container shape. */
+.ps-panel { background: var(--ps-surface); border: var(--ps-bw-struct) solid var(--ps-rule); box-shadow: var(--ps-shadow-2); padding: var(--ps-4); margin-bottom: var(--ps-4); }
+/* The error treatment. The palette has no red. */
+.ps-invert { background: var(--ps-invert-bg); color: var(--ps-invert-ink); border: var(--ps-bw-struct) solid var(--ps-rule); box-shadow: var(--ps-shadow-2); padding: var(--ps-4); margin-bottom: var(--ps-4); }
+.ps-invert .ps-caption, .ps-invert-detail { color: var(--ps-invert-ink); }
+
+/* ---- Nav and footer -------------------------------------- */
+.ps-nav { border-bottom: var(--ps-bw-struct) solid var(--ps-rule); background: var(--ps-surface); }
+.ps-nav-inner { max-width: var(--ps-page-max); margin: 0 auto; padding: var(--ps-3) var(--ps-6); display: flex; flex-wrap: wrap; align-items: center; gap: var(--ps-3) var(--ps-5); }
+.ps-nav-mark { font-family: var(--ps-display); font-size: var(--ps-size-data-m); text-transform: uppercase; text-decoration: none; display: inline-flex; align-items: center; gap: var(--ps-2); }
+.ps-nav-links { display: flex; flex-wrap: wrap; gap: var(--ps-4); flex: 1; }
+.ps-nav-link { font-size: var(--ps-size-nav); text-decoration: none; color: var(--ps-ink-dim); padding-bottom: var(--ps-1); }
+.ps-nav-link:hover { color: var(--ps-ink); }
+.ps-nav-link-active { color: var(--ps-ink); background: var(--ps-surface); border: var(--ps-bw-hair) solid var(--ps-rule); border-radius: var(--ps-r-1); box-shadow: var(--ps-shadow-1); padding: 2px var(--ps-2); margin: -3px calc(var(--ps-2) * -1) -1px; }
+.ps-nav-actions { display: flex; align-items: center; gap: var(--ps-3); }
+.ps-chain-switch { display: inline-flex; gap: var(--ps-1); }
+.ps-theme-toggle { font: inherit; font-size: var(--ps-size-data-m); line-height: 1; width: var(--ps-5); height: var(--ps-5); background: var(--ps-surface); color: var(--ps-ink); border: var(--ps-bw-struct) solid var(--ps-rule); border-radius: var(--ps-r-0); box-shadow: var(--ps-shadow-1); cursor: pointer; }
+.ps-theme-toggle:active { transform: translate(2px, 2px); box-shadow: var(--ps-shadow-pressed); }
+.ps-footer { margin-top: auto; border-top: var(--ps-bw-hair) dashed var(--ps-border); display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--ps-2) var(--ps-4); padding-top: var(--ps-3); padding-bottom: var(--ps-5); }
+.ps-footer-links { display: flex; flex-wrap: wrap; gap: var(--ps-4); }
+.ps-footer-links a { text-decoration: none; }
+.ps-footer-links a:hover { text-decoration: underline; }
+
+/* ---- Budget bar: certified share vs locked ---------------- */
+/* Ten cells, each a tenth of the budget. Green = released to the contributor; dither =
+   locked in escrow; the dither-25 edge cell = certified but not yet paid out. */
+.ps-bar { display: grid; grid-template-columns: repeat(10, 1fr); gap: var(--ps-cell-gap); margin: var(--ps-3) 0; }
+.ps-bar-cell { height: var(--ps-cell-h); border: var(--ps-bw-hair) solid var(--ps-rule); }
+.ps-bar-legend { display: flex; flex-wrap: wrap; gap: var(--ps-2) var(--ps-4); }
+.ps-swatch { display: inline-block; width: var(--ps-3); height: var(--ps-3); border: var(--ps-bw-hair) solid var(--ps-rule); vertical-align: middle; margin-right: var(--ps-1); }
+
+/* ---- Key/value sheet ------------------------------------- */
+.ps-sheet { display: grid; grid-template-columns: max-content 1fr; gap: var(--ps-2) var(--ps-4); margin: 0; }
+.ps-sheet dt { font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; color: var(--ps-ink-dim); }
+.ps-sheet dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ---- Feed: one row per event ------------------------------ */
+.ps-feed { border-top: var(--ps-bw-hair) solid var(--ps-border); margin: 0; padding: 0; list-style: none; }
+.ps-tx-row { display: grid; grid-template-columns: 9ch 22ch 1fr max-content; align-items: baseline; gap: var(--ps-3); min-height: var(--ps-5); padding: var(--ps-2) 0; border-bottom: var(--ps-bw-hair) solid var(--ps-border); }
+.ps-tx-time { color: var(--ps-ink-dim); font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); }
+.ps-tx-action { font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; }
+.ps-tx-detail { font-size: var(--ps-size-detail); line-height: var(--ps-lh-detail); overflow-wrap: anywhere; }
+
+/* ---- Steps and forms -------------------------------------- */
+.ps-steps { list-style: none; margin: 0 0 var(--ps-4); padding: 0; border-top: var(--ps-bw-hair) solid var(--ps-border); counter-reset: step; }
+.ps-step { display: grid; grid-template-columns: var(--ps-5) 1fr; gap: var(--ps-2) var(--ps-3); padding: var(--ps-4) 0; border-bottom: var(--ps-bw-hair) solid var(--ps-border); counter-increment: step; }
+.ps-step::before { content: counter(step); font-family: var(--ps-display); font-size: var(--ps-size-data-m); }
+.ps-step-done::before { content: '✓'; }
+.ps-step-body { min-width: 0; }
+.ps-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--ps-5); }
+.ps-field { display: flex; flex-direction: column; gap: var(--ps-2); margin-bottom: var(--ps-4); }
+.ps-field-wide { grid-column: 1 / -1; }
+.ps-code { font-size: var(--ps-size-detail); line-height: var(--ps-lh-detail); background: var(--ps-sunk); border: var(--ps-bw-hair) solid var(--ps-border); padding: var(--ps-3); margin: var(--ps-2) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- Entry tiles (home) ----------------------------------- */
+.ps-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--ps-4); }
+.ps-tile { display: flex; flex-direction: column; gap: var(--ps-3); }
+.ps-tile .ps-actions { margin-top: auto; }
+.ps-numbered { padding-left: var(--ps-4); margin: 0; }
+.ps-numbered li { margin-bottom: var(--ps-2); max-width: 72ch; }
+
+/* ---- Checking: the mark's bars stepping, never eased ------ */
+.ps-checking { display: inline-flex; align-items: center; gap: var(--ps-2); }
+.ps-checking-cells { display: inline-grid; grid-template-columns: repeat(4, var(--ps-2)); gap: 2px; }
+.ps-checking-cells span { height: var(--ps-3); background: var(--ps-dither-50); border: var(--ps-bw-hair) solid var(--ps-rule); animation: ps-step 960ms var(--ps-step-fast) infinite; }
+.ps-checking-cells span:nth-child(2) { animation-delay: 240ms; }
+.ps-checking-cells span:nth-child(3) { animation-delay: 480ms; }
+.ps-checking-cells span:nth-child(4) { animation-delay: 720ms; }
+@keyframes ps-step { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.25; } }
+
+/* ---- Responsive: the grid wraps, it never scrolls --------- */
+@media (max-width: 720px) {
+  main, .ps-page { padding: var(--ps-4) var(--ps-3) var(--ps-6); }
+  .ps-nav-inner { padding: var(--ps-3); justify-content: space-between; }
+  .ps-nav-links { order: 3; flex-basis: 100%; gap: var(--ps-3); }
+  .ps-display-xl { font-size: var(--ps-size-display-l); line-height: var(--ps-lh-display-l); }
+  .ps-form, .ps-tiles { grid-template-columns: 1fr; }
+  .ps-sheet { grid-template-columns: 1fr; gap: var(--ps-1); }
+  .ps-sheet dd { margin-bottom: var(--ps-2); }
+  .ps-tx-row { grid-template-columns: 1fr max-content; gap: var(--ps-1) var(--ps-2); }
+  .ps-tx-detail { grid-column: 1 / -1; }
+}
+.ps-input-short { max-width: 10ch; }
+.ps-field.ps-check { flex-direction: row; align-items: flex-start; }
+.ps-input::placeholder { color: var(--ps-ink-faint); }
+.ps-button-primary:disabled { background: var(--ps-surface); color: var(--ps-ink-faint); }
