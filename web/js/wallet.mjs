@@ -5,13 +5,22 @@ import { NETWORK } from './config.mjs';
 let connector;
 let account = null;
 const listeners = new Set();
+const REMEMBER = 'ps-wallet';
+
+function remember(acct) {
+  try { if (acct) localStorage.setItem(REMEMBER, acct); else localStorage.removeItem(REMEMBER); } catch { /* blocked: no restore next visit */ }
+}
+
+function remembered() {
+  try { return localStorage.getItem(REMEMBER); } catch { return null; }
+}
 
 async function load() {
   if (connector) return connector;
   const { NearConnector } = await import('../vendor/near-connect-0.12.0.mjs');
   connector = new NearConnector({ network: NETWORK, features: { signAndSendTransactions: true, testnet: true } });
-  connector.on('wallet:signIn', (t) => { account = t.accounts?.[0]?.accountId ?? null; listeners.forEach((f) => f(account)); });
-  connector.on('wallet:signOut', () => { account = null; listeners.forEach((f) => f(null)); });
+  connector.on('wallet:signIn', (t) => { account = t.accounts?.[0]?.accountId ?? null; remember(account); listeners.forEach((f) => f(account)); });
+  connector.on('wallet:signOut', () => { account = null; remember(null); listeners.forEach((f) => f(null)); });
   try {
     const w = await connector.wallet();
     const accounts = await w.getAccounts();
@@ -25,9 +34,12 @@ export function onAccount(f) {
   f(account);
 }
 
-/// Restores a session from an earlier visit, if the wallet kept one.
+/// Restores a session from an earlier visit. The wallet library is only fetched for someone
+/// who connected before, so read-only visits load no wallet code at all.
 export async function restore() {
+  if (!remembered()) return null;
   await load().catch(() => null);
+  remember(account);
   listeners.forEach((f) => f(account));
   return account;
 }
@@ -43,6 +55,7 @@ export async function disconnect() {
   const w = await connector.wallet().catch(() => null);
   await w?.signOut?.();
   account = null;
+  remember(null);
   listeners.forEach((f) => f(null));
 }
 

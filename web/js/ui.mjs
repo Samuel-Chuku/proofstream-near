@@ -1,8 +1,13 @@
 // Shared page chrome and small helpers. Same language as the Arc site: a ruled masthead
 // strip, a dashed-rule footer, the four-bar mark in currentColor, green only for released USDC.
-import { TOKEN, ARC_SITE, REPO, EXPLORER_TX, CONTRACT } from './config.mjs';
+import { TOKEN, ARC_SITE, REPO, EXPLORER_TX, CONTRACT, NEAR_FAUCET } from './config.mjs';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
+
+/// Replaces an element's children, skipping the empty entries a conditional leaves behind.
+export function fill(el, ...children) {
+  el.replaceChildren(...children.flat().filter((c) => c != null && c !== false));
+}
 
 /// Builds DOM from a tag, attributes and children. Text is always set as text, never HTML.
 export function h(tag, attrs = {}, ...children) {
@@ -31,8 +36,9 @@ function setTheme(t) {
   try { localStorage.setItem('ps-theme', t); } catch { /* private mode: still works for this page */ }
 }
 
-/// Nav and footer on every page. `active` names the current page's link.
-export function shell(active) {
+/// Nav and footer on every page. `active` names the current page's link. The landing page
+/// gets Arc's landing strip: the wordmark, the chain switch and one way in, no wallet.
+export function shell(active, { landing = false } = {}) {
   const saved = storedTheme();
   if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
   const link = (href, label, key) => h('a', { href, class: `ps-nav-link${key === active ? ' ps-nav-link-active' : ''}` }, label);
@@ -44,15 +50,66 @@ export function shell(active) {
   const chain = h('span', { class: 'ps-chain-switch', role: 'group', 'aria-label': 'Which chain' },
     h('a', { href: ARC_SITE, class: 'ps-chip ps-chip-link' }, 'ARC'),
     h('span', { class: 'ps-chip ps-chip-current', 'aria-current': 'true' }, 'NEAR'));
-  document.body.prepend(h('nav', { class: 'ps-nav' }, h('div', { class: 'ps-nav-inner' }, mark,
-    h('div', { class: 'ps-nav-links' }, link('./', 'HOME', 'home'), link('new.html', 'NEW MILESTONE', 'new'), link('milestone.html', 'MILESTONES', 'milestone'), link('claim.html', 'CLAIM', 'claim')),
-    h('div', { class: 'ps-nav-actions' }, chain, toggle))));
+  const nav = h('nav', { class: 'ps-nav' });
+  if (landing) {
+    nav.append(h('div', { class: 'ps-nav-inner' }, mark, h('div', { class: 'ps-nav-actions ps-nav-actions-landing' }, chain, h('a', { class: 'ps-button', href: 'app.html' }, '[ GO TO APP ]'), toggle)));
+  } else {
+    const wallet = h('button', { class: 'ps-button ps-wallet-btn', type: 'button', id: 'nav-wallet' }, '[ CONNECT WALLET ]');
+    const menu = h('button', { class: 'ps-nav-menu', type: 'button', 'aria-expanded': 'false' }, '[ MENU ]');
+    menu.addEventListener('click', () => {
+      const open = nav.classList.toggle('ps-nav-open');
+      menu.setAttribute('aria-expanded', String(open));
+      menu.textContent = open ? '[ CLOSE ]' : '[ MENU ]';
+    });
+    nav.append(h('div', { class: 'ps-nav-inner' }, mark, menu,
+      h('div', { class: 'ps-nav-links' }, link('app.html', 'MILESTONES', 'app'), link('new.html', 'NEW MILESTONE', 'new'), link('claim.html', 'CLAIM', 'claim'), link('docs.html', 'HOW IT WORKS', 'docs')),
+      h('div', { class: 'ps-nav-actions' }, chain, wallet, toggle)));
+    import('./wallet.mjs').then((w) => {
+      wallet.addEventListener('click', () => (w.current() ? w.disconnect() : w.connect()).catch(() => {}));
+      w.onAccount((acct) => { wallet.textContent = acct ? `[ ${short(acct, 18)} ]` : '[ CONNECT WALLET ]'; wallet.title = acct ? `${acct}. Click to disconnect.` : ''; });
+      w.restore().catch(() => {});
+    });
+  }
+  document.body.prepend(nav);
   document.body.append(h('footer', { class: 'ps-footer ps-page' },
-    h('p', { class: 'ps-caption' }, `NEAR TESTNET · ${CONTRACT} · NOTHING HERE IS REAL MONEY`),
     h('div', { class: 'ps-footer-links ps-caption' },
-      h('a', { href: REPO }, 'SOURCE ↗'),
-      h('a', { href: `https://testnet.nearblocks.io/address/${CONTRACT}` }, 'CONTRACT ↗'),
-      h('a', { href: ARC_SITE }, 'PROOFSTREAM ON ARC ↗'))));
+      h('a', { href: 'docs.html' }, 'HOW IT WORKS'),
+      h('a', { href: NEAR_FAUCET, target: '_blank', rel: 'noopener' }, 'GET TEST NEAR ↗'),
+      h('a', { href: `https://testnet.nearblocks.io/address/${CONTRACT}`, target: '_blank', rel: 'noopener' }, 'CONTRACT ↗'),
+      h('a', { href: REPO, target: '_blank', rel: 'noopener' }, 'SOURCE ↗'),
+      h('a', { href: ARC_SITE }, 'PROOFSTREAM ON ARC ↗')),
+    h('p', { class: 'ps-caption' }, `NEAR TESTNET · ${CONTRACT} · NOTHING HERE IS REAL MONEY`)));
+}
+
+/// The loading state: the mark's bars filling top to bottom, in a loop.
+export function loading(word = 'PROOFSTREAM', { inline = false } = {}) {
+  return h('div', { class: `ps-loading${inline ? ' ps-loading-inline' : ''}`, role: 'status', 'aria-label': 'Loading' },
+    h('div', { class: 'ps-loading-mark', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span')),
+    h('p', { class: 'ps-loading-word' }, word));
+}
+
+/// The mark beside a page title, as on the Arc app.
+export function titleMark() {
+  return h('div', { class: 'ps-title-mark', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span'));
+}
+
+/// A state name as a chip. Green only when money was released.
+export function stateChip(name, m) {
+  const paid = name === 'Paid' || (m && m.certified_pct > 0 && name === 'Funded');
+  const cls = name === 'Paid' ? 'ps-state-paid' : name === 'Held' || name === 'PayoutFailed' ? 'ps-state-held'
+    : name === 'Refunded' ? 'ps-state-closed' : 'ps-state-open';
+  const label = name === 'Funded' && m?.certified_pct > 0 ? `${m.certified_pct}% PAID` : name.replace(/([a-z])([A-Z])/g, '$1 $2');
+  return h('span', { class: `ps-state ${paid && name !== 'Paid' ? 'ps-state-paid' : cls}` }, label);
+}
+
+/// Accepts "Progress(60)", "Objects(\"unclear\")" or "Failed" and says it in words.
+export function verdictText(v) {
+  if (!v) return 'no verdict';
+  const p = /^Progress\((\d+)\)$/.exec(v);
+  if (p) return `${p[1]}% done`;
+  const o = /^Objects\("?([a-z_]+)"?\)$/.exec(v);
+  if (o) return o[1].replaceAll('_', ' ');
+  return 'no verdict';
 }
 
 /// Token units → "1.20" style text, never floating point.
@@ -95,8 +152,8 @@ export function copyChip(text, label = 'COPY') {
 }
 
 /// The error treatment: an inverted panel. The palette has no red.
-export function problem(message, detail) {
-  return h('div', { class: 'ps-invert', role: 'alert' }, h('p', { class: 'ps-label' }, 'REFUSED'), h('p', { class: 'ps-body' }, message), detail ? h('p', { class: 'ps-caption ps-invert-detail' }, detail) : null);
+export function problem(message, detail, title = 'REFUSED') {
+  return h('div', { class: 'ps-invert', role: 'alert' }, h('p', { class: 'ps-label' }, title), h('p', { class: 'ps-body' }, message), detail ? h('p', { class: 'ps-caption ps-invert-detail' }, detail) : null);
 }
 
 export function sectionRule(label) {

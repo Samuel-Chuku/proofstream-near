@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works · ProofStream</title>
+<meta name="description" content="How ProofStream on NEAR pays for verified work: the flow, the two AIs, what the contract guarantees, what is trusted, and how to check every claim.">
+<link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@700&display=swap">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<main>
+  <header class="ps-masthead"><div>
+    <h1 class="ps-display-xl">How it works</h1>
+    <p class="ps-caption">NEAR TESTNET · PROOFSTREAM-V1.TESTNET</p>
+  </div></header>
+
+  <p class="ps-body">ProofStream pays contributors in USDC that sits in escrow against one milestone of a GitHub repository, and stays locked until the work is checked twice: the hard facts of the merged pull request, read inside an Intel TDX enclave, and the work itself, judged by two AIs from different vendors. The contract pays the lower of the two shares. No human approves a payment, and no AI can release one alone.</p>
+
+  <div class="ps-section-rule"><h2 class="ps-label">The shape of it</h2></div>
+  <ol class="ps-flow">
+    <li><span class="ps-label">Fund</span><span class="ps-detail">the funder escrows the budget in full</span></li>
+    <li><span class="ps-label">Bind</span><span class="ps-detail">the contributor names where to be paid, with a gist</span></li>
+    <li><span class="ps-label">Claim</span><span class="ps-detail">a merged PR's hard facts, checked in TDX</span></li>
+    <li><span class="ps-label">Review</span><span class="ps-detail">the judge, then a signed second opinion</span></li>
+    <li><span class="ps-label">Pay</span><span class="ps-detail">the lower share, straight to the bound account</span></li>
+  </ol>
+  <ol class="ps-numbered ps-detail">
+    <li><strong>A funder creates a milestone</strong> and deposits the budget plus the review fee in one transfer. The contract pins the repository by its numeric GitHub id, the contributor by theirs, the branch, the required CI checks, a deadline, and the exact wasm hash of every enclave program. Nothing is claimable until the deposit lands in full.</li>
+    <li><strong>The contributor binds a payout account</strong> by posting a public gist that names the contract, the milestone, a one-time nonce and a NEAR account. The binder reads it inside TDX and confirms its owner holds the milestone's GitHub id; the contract then checks the account exists (or creates a 64-character implicit account) and registers it with the token. From then on, money can only go there.</li>
+    <li><strong>A pull request merges, and someone claims it.</strong> The checker reads GitHub's API inside TDX: merged into the right repository and branch, by the right author, after the milestone was created, with every required check successful, nothing under <code>.github/</code> changed, the complete file list returned, and a human other than the author merging it or approving that exact commit. The contract applies the rules and locks the pull request against every other milestone.</li>
+    <li><strong>The judge reviews.</strong> It fetches the diff and the milestone text, asks GLM on NEAR AI Cloud how much of the milestone is done, earlier paid work included, and checks the model's signature inside the enclave. If it objects, it stops: no second opinion is bought.</li>
+    <li><strong>The judge buys a second opinion.</strong> It pays the verifier $0.02 over OutLayer's API from its owner's payment key. The verifier is a separate project with its own owner and a different model, Qwen; it reads the same contract-built input, never the judge's answer, and signs its verdict with a key that exists only inside its enclave.</li>
+    <li><strong>The contract decides.</strong> It checks the verifier's signature on-chain, over a message it builds itself, against the key pinned in the milestone. Any objection holds the money for the funder. Two shares more than 30 points apart hold it too. Otherwise the <em>lower</em> share is certified, and only the newly certified part of the budget is paid.</li>
+    <li><strong>The milestone stays open.</strong> A later pull request earns only what it adds. After the deadline, the funder takes back whatever was never certified.</li>
+  </ol>
+
+  <div class="ps-section-rule"><h2 class="ps-label">The system</h2></div>
+  <figure class="ps-figure">
+    <svg viewBox="0 0 960 400" role="img" aria-labelledby="sys-title">
+      <title id="sys-title">Who calls whom: the contract calls OutLayer enclaves; the judge pays the verifier; the contract checks the verifier's signature.</title>
+      <g fill="none" stroke="currentColor" stroke-width="2" font-family="var(--ps-mono)" font-size="13">
+        <rect x="20" y="40" width="170" height="60"/><text x="105" y="66" text-anchor="middle" fill="currentColor" stroke="none">FUNDER</text><text x="105" y="86" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">wallet</text>
+        <rect x="20" y="300" width="170" height="60"/><text x="105" y="326" text-anchor="middle" fill="currentColor" stroke="none">CONTRIBUTOR</text><text x="105" y="346" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">no wallet needed</text>
+        <rect x="250" y="300" width="150" height="60" stroke-dasharray="6 4"/><text x="325" y="326" text-anchor="middle" fill="currentColor" stroke="none">RELAYER</text><text x="325" y="346" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">bind · claim · review</text>
+        <rect x="430" y="150" width="200" height="90" stroke-width="3"/><text x="530" y="182" text-anchor="middle" fill="currentColor" stroke="none">CONTRACT</text><text x="530" y="202" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">proofstream-v1.testnet</text><text x="530" y="222" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">rules · escrow · ed25519_verify</text>
+        <rect x="690" y="20" width="250" height="230" stroke-dasharray="2 4"/><text x="815" y="40" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">OUTLAYER · INTEL TDX</text>
+        <rect x="710" y="55" width="100" height="44"/><text x="760" y="82" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">CHECKER</text>
+        <rect x="825" y="55" width="100" height="44"/><text x="875" y="82" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">BINDER</text>
+        <rect x="710" y="120" width="100" height="44"/><text x="760" y="147" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">JUDGE</text>
+        <rect x="825" y="185" width="100" height="44"/><text x="875" y="212" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">VERIFIER</text>
+        <rect x="690" y="300" width="120" height="60"/><text x="750" y="335" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">GITHUB API</text>
+        <rect x="830" y="300" width="110" height="60"/><text x="885" y="326" text-anchor="middle" fill="currentColor" stroke="none" font-size="12">NEAR AI</text><text x="885" y="344" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">GLM · Qwen</text>
+        <path d="M190 70 H430 V150"/><text x="300" y="62" fill="currentColor" stroke="none" font-size="11">create · fund · release</text>
+        <path d="M190 330 H250"/><path d="M400 330 H460 V240"/>
+        <path d="M630 170 H690"/><text x="634" y="164" fill="currentColor" stroke="none" font-size="11">request</text>
+        <path d="M630 220 H690"/><text x="634" y="236" fill="currentColor" stroke="none" font-size="11">result</text>
+        <path d="M810 142 H875 V185" stroke-dasharray="5 3"/><text x="818" y="136" fill="currentColor" stroke="none" font-size="11">pays $0.02</text>
+        <path d="M760 164 V300"/><path d="M875 229 V300"/>
+        <path d="M530 240 V380 H40" stroke-dasharray="1 4"/><text x="300" y="394" fill="currentColor" stroke="none" font-size="11">USDC payout, only to the bound account</text>
+      </g>
+    </svg>
+    <figcaption class="ps-caption">Solid: calls. Dashed: the judge paying for the second opinion. The contract never trusts the judge's report of the verifier: it checks the verifier's own signature.</figcaption>
+  </figure>
+
+  <div class="ps-section-rule"><h2 class="ps-label">What the bar means</h2></div>
+  <p class="ps-body">Every milestone page carries a bar of 50 cells, each 2% of the budget. Green means one thing everywhere in this interface: USDC the contract has paid out.</p>
+  <div class="ps-legend">
+    <div><span class="ps-swatch-l ps-fill-unlocked"></span><span class="ps-label">Paid</span><span class="ps-detail">certified by both AIs and sent to the contributor's account</span></div>
+    <div><span class="ps-swatch-l ps-fill-valued"></span><span class="ps-label">Certified, pays at merge</span><span class="ps-detail">both AIs approved an open PR; it pays when merged at that exact commit</span></div>
+    <div><span class="ps-swatch-l ps-fill-locked"></span><span class="ps-label">Locked</span><span class="ps-detail">still in escrow, waiting for work</span></div>
+    <div><span class="ps-swatch-l ps-fill-unaccrued"></span><span class="ps-label">Returned</span><span class="ps-detail">after the deadline the funder took back what was never certified</span></div>
+  </div>
+
+  <div class="ps-section-rule"><h2 class="ps-label">The states</h2></div>
+  <figure class="ps-figure">
+    <svg viewBox="0 0 960 250" role="img" aria-labelledby="st-title">
+      <title id="st-title">Milestone states: Funding, Funded, Checking, Hard facts passed, Reviewing, then Paid, back to Funded after a partial payout, Held, or Approved before merge.</title>
+      <g fill="none" stroke="currentColor" stroke-width="2" font-family="var(--ps-mono)" font-size="12">
+        <rect x="10" y="100" width="100" height="40"/><text x="60" y="125" text-anchor="middle" fill="currentColor" stroke="none">FUNDING</text>
+        <rect x="150" y="100" width="100" height="40"/><text x="200" y="125" text-anchor="middle" fill="currentColor" stroke="none">FUNDED</text>
+        <rect x="290" y="100" width="100" height="40"/><text x="340" y="125" text-anchor="middle" fill="currentColor" stroke="none">CHECKING</text>
+        <rect x="430" y="100" width="130" height="40"/><text x="495" y="125" text-anchor="middle" fill="currentColor" stroke="none">FACTS PASSED</text>
+        <rect x="600" y="100" width="110" height="40"/><text x="655" y="125" text-anchor="middle" fill="currentColor" stroke="none">REVIEWING</text>
+        <rect x="770" y="20" width="170" height="40" stroke-width="3"/><text x="855" y="45" text-anchor="middle" fill="currentColor" stroke="none">PAID (100%)</text>
+        <rect x="770" y="80" width="170" height="40"/><text x="855" y="105" text-anchor="middle" fill="currentColor" stroke="none">PARTIAL → FUNDED</text>
+        <rect x="770" y="140" width="170" height="40"/><text x="855" y="165" text-anchor="middle" fill="currentColor" stroke="none">HELD FOR FUNDER</text>
+        <rect x="770" y="200" width="170" height="40"/><text x="855" y="225" text-anchor="middle" fill="currentColor" stroke="none">APPROVED (OPEN PR)</text>
+        <path d="M110 120 H150"/><path d="M250 120 H290"/><path d="M390 120 H430"/><path d="M560 120 H600"/>
+        <path d="M710 120 H740 V40 H770"/><path d="M740 100 H770"/><path d="M740 160 H770"/><path d="M740 120 V220 H770"/>
+        <path d="M340 140 V180 H200 V140" stroke-dasharray="4 3"/><text x="215" y="196" fill="currentColor" stroke="none" font-size="11">refused: lock released</text>
+      </g>
+    </svg>
+    <figcaption class="ps-caption">Held can only be released (a share the funder picks) or rejected (back to Funded, with the reason on-chain). Refunds open after the deadline.</figcaption>
+  </figure>
+
+  <div class="ps-section-rule"><h2 class="ps-label">How the two AIs decide</h2></div>
+  <div class="ps-two">
+    <section>
+      <h3 class="ps-ai-title">The rules</h3>
+      <ul class="ps-numbered ps-detail">
+        <li>Each AI answers <em>meets</em> (100%), <em>partial</em> (1–99%), <em>does not meet</em> or <em>unclear</em>. A verdict that disagrees with its own percent is no verdict.</li>
+        <li>Any objection holds the money for the funder. So do two shares more than 30 points apart, and a share that adds nothing new.</li>
+        <li>Otherwise the lower share is certified. Certified only rises, and each payment is the newly certified part.</li>
+        <li>Both see the earlier paid pull requests, marked as paid, so redoing paid work earns nothing.</li>
+        <li>No verdict (a timeout, a bad signature) counts an attempt and lets anyone ask again, up to the funder's limit.</li>
+      </ul>
+    </section>
+    <section>
+      <h3 class="ps-ai-title">The signed second opinion</h3>
+      <p class="ps-detail">The verifier signs <code>proofstream-verdict:v1:{contract}:{milestone}:{attempt}:{commit}:{verdict}:{percent}:{caller}</code> with an ed25519 key that OutLayer derives inside its enclave and never exports. The contract rebuilds that message from its own state and checks the signature with <code>ed25519_verify</code>, against the key pinned in the milestone, and checks that the judge's owner paid for the run. A verdict the judge changed, a signature from another attempt, milestone or commit, or one by another key, is no verdict at all.</p>
+    </section>
+  </div>
+
+  <div class="ps-section-rule"><h2 class="ps-label">What the contract guarantees</h2></div>
+  <ul class="ps-numbered ps-detail">
+    <li><strong>Nothing is claimable until the deposit lands in full.</strong> A transfer of any other amount comes straight back.</li>
+    <li><strong>Money only goes to the bound account.</strong> Neither the funder, the relayer nor the operators can redirect a payout.</li>
+    <li><strong>A pull request is paid once, across every milestone.</strong> It is locked while it is being checked, and spent once paid.</li>
+    <li><strong>The code that judges is fixed per milestone.</strong> Every enclave program is pinned by wasm hash at creation, and the milestone keeps those pins forever.</li>
+    <li><strong>The contract has no admin.</strong> No owner, no setter, no upgrade method. Its code hash matches the reproducible build in CI.</li>
+    <li><strong>The books reconcile.</strong> What the contract holds equals what it owes, at all times; <code>reconcile()</code> shows it.</li>
+  </ul>
+
+  <div class="ps-section-rule"><h2 class="ps-label">What is attested, checked and trusted</h2></div>
+  <dl class="ps-sheet">
+    <dt>Attested</dt><dd class="ps-detail">Each run's TDX quote binds the project id, the wasm hash that ran, and the input and output. The AI's role comes from the OutLayer project the contract called. The worker sets it, and neither the input nor the secrets can change it. The project id, the wasm hash, the input and the output (which echoes the role) are all bound into the execution's TDX quote. The contract refuses a verdict from the wrong role; the quote itself is checked off-chain, by anyone, with <code>scripts/verify-execution.py</code>, not by the contract.</dd>
+    <dt>Checked on-chain</dt><dd class="ps-detail">Every rule and payout; the verifier's signature; that results come from a worker whose key was added only after its TDX quote passed.</dd>
+    <dt>Checked by anyone</dt><dd class="ps-detail">Each execution's quote, down to Intel's signature: <code>python3 -I scripts/verify-execution.py &lt;tx&gt;</code>.</dd>
+    <dt>Trusted</dt><dd class="ps-detail">GitHub's API for the facts; OutLayer's measurement allowlist and keystore; NEAR AI's TEE and its signing key; the people who merge. The verifier's key belongs to its project, so a new version published by its owner would sign with the same key.</dd>
+  </dl>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Check it yourself</h2></div>
+  <pre class="ps-code">git clone https://github.com/Samuel-Chuku/proofstream-near && cd proofstream-near
+cd contract && cargo test --lib                       # every contract rule, including each refusal
+cargo test --test sandbox                             # a local NEAR node, a real token, the books reconciling
+cd ../outlayer/ai-review && cargo test                # unsigned, altered or off-commit answers refused
+python3 -I scripts/verify-execution.py &lt;tx hash&gt;     # one run's TDX quote, down to Intel</pre>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Limitations, named</h2></div>
+  <ul class="ps-numbered ps-detail">
+    <li><strong>The judge and verifier are run by the same people for now.</strong> They are independent in keys, accounts and models, not in operator.</li>
+    <li><strong>A contributor can weaken their own tests.</strong> The AIs are told to look for it, and can miss it.</li>
+    <li><strong>A second GitHub account defeats the independent-approval rule.</strong></li>
+    <li><strong>Partial shares are a model's estimate,</strong> bounded by two models, the lower one and the 30-point gap.</li>
+    <li><strong>A funder who disagrees can reject, and refund after the deadline.</strong> The contributor's protection is the milestone text and deadline they read before starting, and the public record of every rejection and its reason.</li>
+    <li><strong>Public repositories only,</strong> and testnet only: the USDC is free to mint.</li>
+  </ul>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Addresses</h2></div>
+  <dl class="ps-sheet ps-mono-id">
+    <dt>Contract</dt><dd><a href="https://testnet.nearblocks.io/address/proofstream-v1.testnet">proofstream-v1.testnet ↗</a></dd>
+    <dt>Token</dt><dd><a href="https://testnet.nearblocks.io/address/usdc.fakes.testnet">usdc.fakes.testnet ↗</a></dd>
+    <dt>Relayer</dt><dd><a href="https://relayer.proofstream.site/health">relayer.proofstream.site ↗</a> · proofstream-relayer.testnet</dd>
+    <dt>Judge</dt><dd>proofstream-checker-owner.testnet/proofstream-judge</dd>
+    <dt>Verifier</dt><dd>proofstream-verifier-owner.testnet/proofstream-verifier · key 6abd46ea8cb3bffd74a8b4acce3d9a1fef81956e57ef86dd3f0970a00e25c7f1</dd>
+    <dt>Builds</dt><dd><a href="builds.json">builds.json</a>, from the reproducible CI build</dd>
+  </dl>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Getting started</h2></div>
+  <p class="ps-body">You need a NEAR testnet wallet with a little NEAR, and test USDC, which the app mints for you in one click. Contributors need neither.</p>
+  <div class="ps-actions"><a class="ps-button ps-button-primary" href="new.html">[ Create a milestone ]</a><a class="ps-button" href="claim.html">[ Claim one ]</a><a class="ps-button" href="app.html">[ See them all ]</a></div>
+</main>
+<script type="module">
+  import { shell } from './js/ui.mjs';
+  shell('docs');
+</script>
+</body>
+</html>

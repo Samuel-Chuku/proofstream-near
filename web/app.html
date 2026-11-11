@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Milestones · ProofStream</title>
+<meta name="description" content="Every ProofStream milestone on NEAR testnet, live: what was escrowed, reviewed and paid.">
+<link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@700&display=swap">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<main>
+  <header class="ps-masthead">
+    <div class="ps-title-row">
+      <div class="ps-title-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div>
+        <h1 class="ps-display-xl">Milestones</h1>
+        <p class="ps-caption" id="caption">NEAR TESTNET · PROOFSTREAM-V1.TESTNET</p>
+      </div>
+    </div>
+  </header>
+  <p class="ps-body">Fund a milestone against a GitHub repository. When a merged pull request passes the hard facts in TDX, two AIs say how much of the milestone it completes, and the contract pays the lower share to the contributor's bound account.</p>
+  <div class="ps-actions">
+    <a class="ps-button ps-button-primary" href="new.html">[ Create a milestone ]</a>
+    <a class="ps-button" href="#milestones">[ Browse milestones ]</a>
+    <a class="ps-button" href="docs.html">[ How it works ]</a>
+  </div>
+
+  <div id="stats"></div>
+
+  <section class="ps-panel" id="start">
+    <div class="ps-panel-head"><p class="ps-label" id="start-title">Getting started</p><button class="ps-chip" type="button" id="start-hide" aria-label="Hide getting started">×</button></div>
+    <ol class="ps-checklist" id="steps"></ol>
+    <p class="ps-caption">New here? <a href="docs.html">Read how it works</a> first. It takes two minutes.</p>
+  </section>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Contributors</h2></div>
+  <section class="ps-panel">
+    <p class="ps-label">No wallet? No NEAR? You can still be paid.</p>
+    <p class="ps-body">Post a public gist from your GitHub account naming the NEAR account to pay, then claim with your merged pull request. The relayer sends every step for you, and it can only send what the contract would accept. A new 64-character implicit account is created for you if you give one.</p>
+    <div class="ps-actions"><a class="ps-button" href="claim.html">[ Claim a milestone ]</a></div>
+  </section>
+
+  <div class="ps-section-rule" id="milestones"><h2 class="ps-label">Milestones</h2></div>
+  <div class="ps-filters" id="filters" role="group" aria-label="Filter milestones"></div>
+  <div id="table"></div>
+
+  <div class="ps-section-rule"><h2 class="ps-label">Built on NEAR</h2></div>
+  <div id="stack"></div>
+</main>
+<script type="module" src="js/app.mjs"></script>
+</body>
+</html>

@@ -3,7 +3,8 @@ export const NETWORK = 'testnet';
 export const CONTRACT = 'proofstream-v1.testnet';
 export const TOKEN = { id: 'usdc.fakes.testnet', symbol: 'USDC', decimals: 6 };
 export const RELAYER = 'https://relayer.proofstream.site';
-export const RPC = ['https://rpc.testnet.near.org', 'https://archival-rpc.testnet.near.org'];
+// FastNEAR's archival node first (generous limits, every transaction), then NEAR's own.
+export const RPC = ['https://archival-rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org', 'https://archival-rpc.testnet.near.org'];
 export const NEARBLOCKS = 'https://api-testnet.nearblocks.io/v3';
 export const OUTLAYER_API = 'https://testnet-api.outlayer.ai';
 export const EXPLORER_TX = (hash) => `https://testnet.nearblocks.io/txns/${hash}`;
@@ -31,3 +32,12 @@ export const VERIFIER_FEE = '20000';
 export const TGAS = 10n ** 12n;
 export const CREATE_DEPOSIT = 10n ** 23n; // 0.1 NEAR for storage; the unused part comes back
 export const GAS_300 = (300n * TGAS).toString();
+
+// Getting started. Test NEAR from the public faucet; test USDC from the token's own public
+// `mint`, sent from the visitor's wallet (it registers them with the token first).
+export const NEAR_FAUCET = 'https://near-faucet.io/';
+export const NEAR_WALLET = 'https://testnet.mynearwallet.com/';
+export const USDC_MINT_UNITS = '10000000'; // 10 test USDC
+export const TOKEN_STORAGE_DEPOSIT = '1250000000000000000000'; // 0.00125 NEAR
+export const RELAYER_ACCOUNT = 'proofstream-relayer.testnet';
+export const OUTLAYER_DOCS = 'https://outlayer.ai/';
