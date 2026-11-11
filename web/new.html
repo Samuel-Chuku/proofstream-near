@@ -14,67 +14,80 @@
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
-<body>
 <main>
   <header class="ps-masthead">
     <div>
-      <p class="ps-caption">FUNDER</p>
-      <h1 class="ps-display-l">New milestone</h1>
-      <p class="ps-detail">Your wallet signs two transactions in one prompt: create the milestone, then deposit the budget and the review fee. Nothing is claimable until both land.</p>
+      <h1 class="ps-display-xl">New milestone</h1>
+      <p class="ps-caption">NEAR TESTNET · PROOFSTREAM-V1.TESTNET</p>
     </div>
-    <div class="ps-actions"><button class="ps-button" type="button" id="connect">Connect wallet</button></div>
   </header>
   <form id="form" novalidate>
-    <div class="ps-form">
-      <label class="ps-field">
-        <span class="ps-caption">Repository (owner/name)</span>
-        <input class="ps-input" name="repo" placeholder="Samuel-Chuku/proofstream-test" required autocomplete="off" spellcheck="false">
-        <span class="ps-detail" id="repo-note"></span>
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Base branch</span>
-        <input class="ps-input" name="branch" placeholder="main" required autocomplete="off">
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Contributor's GitHub username</span>
-        <input class="ps-input" name="contributor" required autocomplete="off" spellcheck="false">
-        <span class="ps-detail" id="contributor-note"></span>
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Required CI checks (comma-separated)</span>
-        <input class="ps-input" name="checks" placeholder="ci" required autocomplete="off">
-      </label>
-      <label class="ps-field ps-field-wide">
-        <span class="ps-caption">The milestone: what "done" means</span>
-        <textarea class="ps-input" name="text" rows="4" maxlength="2000" required></textarea>
-        <span class="ps-detail" id="text-note">Vague milestones go to you: the AIs answer "unclear", which holds the money for your decision. Name the files, the behaviour and the tests you expect.</span>
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Budget (USDC, at least 1)</span>
-        <input class="ps-input" name="budget" inputmode="decimal" value="1" required>
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Review attempts (1–25)</span>
-        <input class="ps-input" name="attempts" inputmode="numeric" value="10" required>
-        <span class="ps-detail" id="fee-note"></span>
-      </label>
-      <label class="ps-field">
-        <span class="ps-caption">Deadline (your local time)</span>
-        <input class="ps-input" name="deadline" type="datetime-local" required>
-        <span class="ps-detail">After it passes, you can take back whatever was never certified.</span>
-      </label>
-      <label class="ps-field ps-check">
-        <input type="checkbox" name="self">
-        <span class="ps-detail">Allow the contributor to merge their own PR. Off by default: someone else must merge it or approve the exact commit.</span>
-      </label>
-    </div>
-    <div class="ps-panel">
-      <p class="ps-label">You deposit</p>
-      <p id="total"></p>
-      <p class="ps-detail">The code that checks the work is pinned by exact hash: the published reproducible builds and the verifier's signing key. The milestone keeps these forever, whatever is deployed later.</p>
-    </div>
-    <div class="ps-actions"><button class="ps-button" type="submit" id="submit" disabled>Create and fund</button><span class="ps-caption" id="submit-note">connect a wallet first</span></div>
-    <div id="out"></div>
+    <details class="ps-section" id="s-wallet" open>
+      <summary><span class="ps-label">1 · Your wallet</span><span class="ps-section-done" data-done></span></summary>
+      <div class="ps-section-body" id="wallet-body"></div>
+    </details>
+    <details class="ps-section" id="s-repo">
+      <summary><span class="ps-label">2 · The repository</span><span class="ps-section-done" data-done></span></summary>
+      <div class="ps-section-body" id="repo-body"></div>
+    </details>
+    <details class="ps-section" id="s-who">
+      <summary><span class="ps-label">3 · The contributor</span><span class="ps-section-done" data-done></span></summary>
+      <div class="ps-section-body">
+        <div class="ps-form">
+          <label class="ps-field">
+            <span class="ps-caption">Their GitHub username</span>
+            <input class="ps-input" name="contributor" autocomplete="off" spellcheck="false" placeholder="octocat">
+            <span class="ps-detail" id="contributor-note">Only this account's gist can bind the payout account, and only its pull requests count. It is pinned by GitHub's numeric id, so a renamed login can't take it over.</span>
+          </label>
+          <label class="ps-field ps-check">
+            <input type="checkbox" name="self">
+            <span class="ps-detail">Let them merge their own pull request. Off by default: someone else must merge it, or approve the exact commit.</span>
+          </label>
+        </div>
+      </div>
+    </details>
+    <details class="ps-section" id="s-terms">
+      <summary><span class="ps-label">4 · The terms</span><span class="ps-section-done" data-done></span></summary>
+      <div class="ps-section-body">
+        <div class="ps-form">
+          <label class="ps-field">
+            <span class="ps-caption">Milestone budget (USDC)</span>
+            <input class="ps-input" name="budget" inputmode="decimal" value="2">
+            <span class="ps-caption">You deposit it in full now. Nothing is claimable until you do.</span>
+          </label>
+          <label class="ps-field">
+            <span class="ps-caption">Deadline (your local time)</span>
+            <input class="ps-input" name="deadline" type="datetime-local">
+            <span class="ps-caption">After it, you can take back whatever was never certified.</span>
+          </label>
+          <label class="ps-field">
+            <span class="ps-caption">Reviews allowed (1–25)</span>
+            <input class="ps-input" name="attempts" inputmode="numeric" value="10">
+            <span class="ps-caption" id="fee-note"></span>
+          </label>
+          <label class="ps-field">
+            <span class="ps-caption">Required CI checks (comma-separated)</span>
+            <input class="ps-input" name="checks" value="ci" autocomplete="off">
+            <span class="ps-caption">Each must succeed on the merged commit. Skipped, cancelled or missing fails.</span>
+          </label>
+          <label class="ps-field ps-field-wide">
+            <span class="ps-caption">Acceptance criteria (the milestone)</span>
+            <textarea class="ps-input" name="text" rows="5" maxlength="2000" placeholder="[ Add src/slug.rs with slugify(s: &str) -> String: lowercase ASCII letters, collapse other characters into one dash, trim dashes at both ends, with unit tests for each rule. ]"></textarea>
+            <span class="ps-caption" id="text-note">Both AIs read this verbatim, and say how much of it a pull request completes. Name the files, the behaviour and the tests you expect. Vague text gets "unclear", which holds the money for you.</span>
+          </label>
+        </div>
+      </div>
+    </details>
+    <details class="ps-section" id="s-create" open>
+      <summary><span class="ps-label">5 · Create it</span></summary>
+      <div class="ps-section-body">
+        <div id="blockers"></div>
+        <div class="ps-panel"><p class="ps-label">You deposit</p><p id="total"></p><p class="ps-detail">Budget plus the review fee, in one transfer. Unspent fee comes back to you. The code that checks the work is pinned by exact hash, the published reproducible builds and the verifier's signing key, and the milestone keeps those forever.</p></div>
+        <ol class="ps-checklist" id="tx-steps"></ol>
+        <div class="ps-actions"><button class="ps-button ps-button-primary" type="submit" id="submit" disabled>[ Create and fund ]</button></div>
+        <div id="out"></div>
+      </div>
+    </details>
   </form>
 </main>
 <script type="module" src="js/new.mjs"></script>
