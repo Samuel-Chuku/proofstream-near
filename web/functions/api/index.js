@@ -25,7 +25,7 @@ const STALE_FOR_MS = 10 * 60 * 1000;
 const running = new Set();
 let fetchesTotal = 0;
 const realFetch = globalThis.fetch;
-globalThis.fetch = (input, init = {}) => {
+globalThis.fetch = function guardedFetch(input, init = {}) {
   let start = Infinity;
   let deadline = Infinity;
   for (const c of running) { start = Math.min(start, c.start); deadline = Math.min(deadline, c.deadline); }
@@ -37,21 +37,15 @@ globalThis.fetch = (input, init = {}) => {
     init = { ...init, signal: init.signal ? AbortSignal.any([init.signal, stop]) : stop };
   }
   fetchesTotal += 1;
-  return realFetch(input, init);
+  return realFetch.call(globalThis, input, init);
 };
 
 const json = (body, ttl) => new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}` } });
 
 /// Reads the chain and stores the result. Every index is kept as the last one, so the next build
-/// reuses what this one read; only a complete one is shared as the fresh index.
-/// One rebuild at a time per isolate: visitors arriving during it share its result.
-let inflight = null;
-function rebuild(cache, keys, known) {
-  inflight ??= build(cache, keys, known).finally(() => { inflight = null; });
-  return inflight;
-}
-
-async function build(cache, keys, known) {
+/// reuses what this one read; only a complete one is shared as the fresh index. Each call builds
+/// its own: Workers don't let one request use I/O started by another.
+async function rebuild(cache, keys, known) {
   const readTx = async (hash) => known.get(hash) ?? txDetail(hash);
   const call = { start: fetchesTotal, deadline: Date.now() + READ_FOR_MS };
   running.add(call);
@@ -63,7 +57,19 @@ async function build(cache, keys, known) {
   return { body, puts: Promise.all(puts) };
 }
 
-export async function onRequestGet({ request, waitUntil }) {
+export async function onRequestGet(context) {
+  try {
+    return await serve(context);
+  } catch (e) {
+    // Answer with the reason rather than Cloudflare's bare error page; the pages then read the
+    // chain themselves.
+    return new Response(JSON.stringify({ error: 'index_failed', message: String(e?.message ?? e) }), { status: 502, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  }
+}
+
+async function serve(context) {
+  const { request } = context;
+  const waitUntil = (p) => context.waitUntil(p);
   const cache = caches.default;
   const origin = new URL(request.url).origin;
   const keys = { index: new Request(`${origin}/api/index`), last: new Request(`${origin}/api/__index-last`) };

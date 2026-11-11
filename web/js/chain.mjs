@@ -23,7 +23,7 @@ async function rpc(method, params, urls = RPC, timeoutMs = TIMEOUT_MS) {
         return body.result;
       } catch (e) {
         last = e;
-        // The caller ran out of budget (functions/api/index.js): retrying can't help.
+        // The caller ran out of budget (functions/api.js): retrying can't help.
         if (e.stop) throw e;
         // A node that doesn't know the transaction (too old for it): try the next node now.
         if (e.rpc && /UNKNOWN_TRANSACTION/.test(e.message)) break;
@@ -208,7 +208,7 @@ export async function buildIndex(readTx = txDetail) {
   return { at: Date.now(), milestones, txs, unread: txs.filter((t) => t.unread).length };
 }
 
-/// The index, from the site's shared copy (/api/index, built once for every visitor) when it
+/// The index, from the site's shared copy (/api, built once for every visitor) when it
 /// answers, otherwise read from the chain in this browser. Kept 30 seconds between pages.
 export function loadIndex({ fresh = false } = {}) {
   if (!fresh) {
@@ -219,7 +219,7 @@ export function loadIndex({ fresh = false } = {}) {
   indexPromise = (async () => {
     let index = null;
     try {
-      const res = await fetch('/api/index', { signal: AbortSignal.timeout(45000) });
+      const res = await fetch('/api', { signal: AbortSignal.timeout(45000) });
       if (res.ok && (res.headers.get('Content-Type') || '').includes('application/json')) index = await res.json();
     } catch { /* no shared copy: read it here */ }
     if (!index || !Array.isArray(index.txs)) index = await buildIndex();
