@@ -87,7 +87,8 @@ None of these needs keys or spends anything.
 - **Limits per milestone:** at most 5 paid PRs. Review attempts are shared by all of them (default 10, up to 25).
 - **Private repos:** only GitHub Actions results are visible to the checker.
 - **Operators:** the judge and verifier are independent in keys and accounts, but have the same operator for now.
-- **The second opinion:** the judge only asks for it when it reports progress. When the judge objects, the milestone is held on the judge's word alone, with no verifier fee spent.
+- **The second opinion:** the judge only asks for it when it reports progress. When the judge objects, the milestone is held on the judge's word alone. The milestone still pays the review fee, and the judge's owner keeps it, so an operator who objects spends less than one who approves. The pinned code decides, not the operator, but open operators (a next step) would need this priced in.
+- **The second opinion can be lost.** The judge waits 35 s for it inside a run capped at 60 s, under NEAR's ~123 s yield window. When OutLayer's queue is slow (measured at 40–67 s on 2026-11-11), the review ends in a retry and nothing is paid. Delivering the signed verdict in a later transaction would remove this; it isn't built.
 - **Money:** test USDC is free to mint, and nothing runs on mainnet.
 
 ## Run it
