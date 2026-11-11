@@ -44,7 +44,7 @@ None of these needs keys or spends anything.
 | The checker fails closed on every hard fact | `cd outlayer/checker && cargo test` | `36 passed` |
 | The binder accepts only the GitHub id holder's gist for this contract and milestone | `cd outlayer/binder && cargo test` | `14 passed` |
 | The relayer can only send what the contract would accept | `node --test relayer/test/*.test.mjs` | `pass 26` |
-| Two claims racing for one payout: one pays, one is refused | `scripts/race-demo.sh` | `Claim 2 was refused 15 blocks before claim 1 finished.` |
+| Two claims racing for one payout: one pays, one is refused | `scripts/race-demo.sh` | `Claim 2 was refused 86 blocks before claim 1 finished its check.` |
 | A forged AI verdict is rejected inside the enclave | `scripts/tamper-demo.sh` | `signature_text_mismatch, no verdict` |
 | An execution ran the pinned build on approved TDX hardware, signed by Intel | `python3 -I scripts/verify-execution.py DqMmabKEXwxAYyM5KCubBmjMc18fFio819zJzYDQpqNV` | `PASS: 8 passed, 0 failed, 0 skipped` |
 | The relayer's transaction encoder matches NEAR byte for byte | `node relayer/scripts/rehash.mjs 3ECgMRHSomNW7dZnocwyMPw1R8bUNG8GDpzShic8Zuou:proofstream-contributor.testnet` | `PASS: 1 of 1 re-encoded exactly` |
