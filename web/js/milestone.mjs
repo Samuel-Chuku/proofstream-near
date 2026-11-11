@@ -161,8 +161,8 @@ function evidence(index, m) {
     txs: [h('p', { class: 'ps-caption' }, 'NEWEST FIRST · EVERY ROW LINKS TO NEARBLOCKS, SO NOTHING HERE HAS TO BE TAKEN ON TRUST'),
       h('p', { class: 'ps-subhead' }, 'By the contract, the relayer and the contributor'), txRows(automated),
       h('p', { class: 'ps-subhead' }, 'By the funder'), txRows(human)],
-    fee: [h('p', { class: 'ps-body' }, h('strong', {}, `${usdc(BigInt(VERIFIER_FEE) * BigInt(opinions))} USDC`), ` for ${opinions} second opinion${opinions === 1 ? '' : 's'}, from the judge owner's OutLayer payment key to the verifier's owner. That is one AI paying another for a service, with the contract reimbursing the fee from the milestone's budget.`),
-      h('p', { class: 'ps-caption' }, `REFUSING IS FREE · ${refused} REVIEW${refused === 1 ? '' : 'S'} WHERE THE JUDGE OBJECTED AND BOUGHT NOTHING`)],
+    fee: [h('p', { class: 'ps-body' }, h('strong', {}, `${usdc(BigInt(VERIFIER_FEE) * BigInt(opinions))} USDC`), ` for ${opinions} second opinion${opinions === 1 ? '' : 's'}, from the judge owner's OutLayer payment key to the verifier's owner: one AI paying another for a service. Each review pays the judge's owner that fee from the milestone's review budget; the judge passes it on only when it asks for a second opinion.`),
+      h('p', { class: 'ps-caption' }, `${refused} REVIEW${refused === 1 ? '' : 'S'} WHERE THE JUDGE OBJECTED: NO SECOND OPINION BOUGHT, THE FEE STAYED WITH THE JUDGE'S OWNER`)],
   };
 }
 
