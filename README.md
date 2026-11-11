@@ -4,7 +4,14 @@ Milestone payouts for open-source work, released by verified facts and two indep
 
 A funder escrows a budget in a NEAR contract against one milestone of a GitHub repository. A contributor gets paid when a merged pull request passes the **hard facts**, checked inside an Intel TDX enclave on OutLayer, and **two AI reviewers** from different model vendors and owners both certify how much of the milestone it completes. The contract pays the **lower** of the two shares, so half a job earns half the budget. No AI verdict can move money on its own.
 
-> **Status (2026-11-09):** every component is built and tested. The final contract, `proofstream-v1.testnet`, isn't deployed yet. The on-chain evidence below comes from the spike contracts that proved each piece. Testnet only, with free test USDC.
+> **Status (2026-11-11):** live on NEAR testnet. The contract `proofstream-v1.testnet` runs the reproducible build of commit `068742e`, and 8 milestones have run on it: paid in full, paid in part, refused, held, released by the funder and refunded. Every one is listed with its transactions in [docs/EVIDENCE.md](docs/EVIDENCE.md). Testnet only, with free test USDC.
+
+## Try it
+
+- **Site:** [near.proofstream.site](https://near.proofstream.site). Browse every milestone with both AI verdicts and every transaction, create and fund one with a NEAR wallet, or claim one as a contributor with no wallet.
+- **Contract:** [`proofstream-v1.testnet`](https://testnet.nearblocks.io/address/proofstream-v1.testnet). No admin, setter or upgrade method.
+- **Relayer:** `relayer.proofstream.site`, for contributors without NEAR (see below).
+- **Test USDC:** `usdc.fakes.testnet` mints to anyone; the site's getting-started panel does it in one wallet click.
 
 ## How a milestone pays
 
@@ -46,8 +53,9 @@ None of these needs keys or spends anything.
 | The relayer can only send what the contract would accept | `node --test relayer/test/*.test.mjs` | `pass 26` |
 | Two claims racing for one payout: one pays, one is refused | `scripts/race-demo.sh` | `Claim 2 was refused 86 blocks before claim 1 finished its check.` |
 | A forged AI verdict is rejected inside the enclave | `scripts/tamper-demo.sh` | `signature_text_mismatch, no verdict` |
-| An execution ran the pinned build on approved TDX hardware, signed by Intel | `python3 -I scripts/verify-execution.py DqMmabKEXwxAYyM5KCubBmjMc18fFio819zJzYDQpqNV` | `PASS: 8 passed, 0 failed, 0 skipped` |
-| The relayer's transaction encoder matches NEAR byte for byte | `node relayer/scripts/rehash.mjs 3ECgMRHSomNW7dZnocwyMPw1R8bUNG8GDpzShic8Zuou:proofstream-contributor.testnet` | `PASS: 1 of 1 re-encoded exactly` |
+| An execution ran the pinned build on approved TDX hardware, signed by Intel | `python3 -I scripts/verify-execution.py 3BBEpZ16fXSUDMp3bRza4JXpeSb6gPNaj3Gsr8RWpwKo` | `PASS: 8 passed, 0 failed, 0 skipped` |
+| The relayer's transaction encoder matches NEAR byte for byte | `node relayer/scripts/rehash.mjs GSXCPVi78F5f8fggGZi3yK9UNMmBwWiK8rSb5WpQp689:proofstream-relayer.testnet` | `PASS: 1 of 1 re-encoded exactly` |
+| Everything above happened on the live contract | [docs/EVIDENCE.md](docs/EVIDENCE.md): every payout, refusal and funder action, linked to its transaction | |
 | Every enclave build and the contract are reproducible | [.github/workflows/build.yml](.github/workflows/build.yml): builds each one twice from scratch in pinned images | identical hashes, written to `builds.json` |
 
 `verify-execution.py` uses the standard library only. Its last check, `intel-chain`, needs [`dcap-qvl`](https://crates.io/crates/dcap-qvl-cli) (`cargo install dcap-qvl-cli --version 0.7.1 --locked`) and prints `SKIP` without it.
@@ -102,12 +110,15 @@ None of these needs keys or spends anything.
 
 The relayer has its own settings and key file; see [relayer/DEPLOY.md](relayer/DEPLOY.md).
 
+**The front end** ([web/](web/)) is static pages with no build step, plus two Cloudflare Pages Functions: one signs funders in with a GitHub App to pick a repository and create a branch, and one builds the chain history once for every visitor. Its settings and secrets are in [web/README.md](web/README.md). Run it locally with `cd web && python3 -m http.server 8765`; without the functions, each page reads the chain itself.
+
 ## Next steps
 
+- **Deliver the second opinion in its own transaction.** The verifier's verdict is already signed by its pinned enclave key, so anyone can relay it to the contract later. The contract would wait for it with its own deadline, so a slow OutLayer queue delays a payout instead of losing the review.
 - **Bind the verifier's key to its build.** OutLayer's `bind: "wasm"` keys belong to one exact build, but they are only issued to direct runs, not project runs. Either OutLayer supports per-build keys for projects, or the verifier runs directly from its wasm URL.
 - **Open operators.** Anyone runs the agents and keeps whatever fee they don't spend, priced up front. Funders pick pinned code, not operators.
 - **More:**
-  - a GitHub App instead of tokens;
+  - a GitHub App instead of tokens for the checker and the AIs (the site already uses one to sign funders in);
   - checking model attestation inside the enclave;
   - a third-party arbiter for rejections;
   - meta-transactions (NEP-366) once a contributor has an account;
@@ -115,6 +126,10 @@ The relayer has its own settings and key file; see [relayer/DEPLOY.md](relayer/D
 - **Pay contributors on any chain.** The gist names an address on Base, Solana or another chain, and the payout routes through NEAR Intents. Before this ships, the Intents deposit address has to be fetched and bound inside the enclave, so no relayer can substitute its own. Mainnet only, since NEAR Intents has no testnet.
 - **Fund milestones from any chain.** USDC arrives through NEAR Intents' `customRecipientMsg`, which calls the contract's `ft_transfer_call`. This needs an exact-output quote and a funding message that names the funder, because the sender is Intents' withdrawal account. NEAR Intents marks this path as experimental.
 - **Optional yield on escrowed budgets.** An opt-in setting would supply idle milestone budgets to RHEA Lending through `@rhea-finance/cross-chain-sdk` and withdraw them before payout. Like any DeFi integration, it would be off by default, and the funder chooses whether to use it.
+
+## Credits
+
+- **Front end:** committed by [eso8484](https://github.com/eso8484) (ENEJO SUNDAY OCHE), on the ProofStream design system from the Arc entry.
 
 ## Prior work and the other entry
 
