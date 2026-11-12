@@ -9,7 +9,8 @@ import { parseRequest } from './policy.mjs';
 export const AUTO = Object.freeze({
   pollMs: 15_000,          // GitHub poll per repository; unchanged lists come back 304 (free)
   followMs: 3_000,         // milestone reads while the checker runs
-  followMaxMs: 180_000,    // give up following a claim after 3 minutes
+  followMaxMs: 240_000,    // give up if a claim or review shows no outcome for 4 minutes
+  maxReviews: 3,           // reviews sent per claim: the first, plus two retries if OutLayer loses the second opinion
   prsPerRepo: 20,          // most recently updated closed PRs read per poll
   maxMilestones: 500,      // stop scanning ids past this
   githubTimeoutMs: 10_000,
@@ -81,7 +82,8 @@ export function createAutoclaim(deps) {
     return out;
   }
 
-  /// Claim, then wait for the checker and ask for the review. Refusals end it quietly.
+  /// Claim, wait for the checker, ask for the review, and ask again if the review comes back
+  /// without a verdict (the milestone returns to HardFactsPassed). Refusals end it quietly.
   async function claimAndReview(m, pr) {
     following.add(m.id);
     try {
@@ -93,23 +95,30 @@ export function createAutoclaim(deps) {
         return;
       }
       deps.log('auto_claim_sent', { milestone_id: m.id, pr, tx });
-      const deadline = now() + AUTO.followMaxMs;
+      let deadline = now() + AUTO.followMaxMs;
+      let reviews = 0;
       while (now() < deadline) {
         await sleep(AUTO.followMs);
         const cur = await deps.view('get_milestone', { milestone_id: m.id });
         const name = stateName(cur?.state);
-        if (name === 'Checking') continue;
+        if (name === 'Checking' || name === 'Reviewing') continue;
         if (name !== 'HardFactsPassed' || cur.state.HardFactsPassed.pr !== pr) {
-          deps.log('auto_claim_stopped', { milestone_id: m.id, pr, state: name });
+          deps.log('auto_claim_stopped', { milestone_id: m.id, pr, state: name, reviews });
+          return;
+        }
+        if (reviews >= AUTO.maxReviews) {
+          deps.log('auto_review_gave_up', { milestone_id: m.id, pr, reviews });
           return;
         }
         try {
           const rtx = await deps.submit(parseRequest('review', { milestone_id: m.id }));
-          deps.log('auto_review_sent', { milestone_id: m.id, pr, tx: rtx });
+          reviews += 1;
+          deps.log('auto_review_sent', { milestone_id: m.id, pr, tx: rtx, attempt: reviews });
         } catch (e) {
           deps.log('auto_review_refused', { milestone_id: m.id, pr, reason: e.reason ?? e.message });
+          return;
         }
-        return;
+        deadline = now() + AUTO.followMaxMs;
       }
       deps.log('auto_claim_timeout', { milestone_id: m.id, pr });
     } finally {

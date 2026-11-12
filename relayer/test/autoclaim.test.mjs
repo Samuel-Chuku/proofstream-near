@@ -14,7 +14,7 @@ function milestone(over = {}) {
 }
 
 /** A fake chain: milestones by id; claim moves to Checking, then to `after` on the next read. */
-function rig({ milestones, prs, after = (pr) => ({ HardFactsPassed: { pr } }), refuse = {} }) {
+function rig({ milestones, prs, after = (pr) => ({ HardFactsPassed: { pr } }), refuse = {}, reviewOutcomes = [] }) {
   let clock = START;
   const sent = [];
   const logs = [];
@@ -34,8 +34,11 @@ function rig({ milestones, prs, after = (pr) => ({ HardFactsPassed: { pr } }), r
       milestones[req.milestoneId] = { ...milestones[req.milestoneId], state: { Checking: { pr: req.prNumber } } };
       pending.set(req.milestoneId, { reads: 0, next: after(req.prNumber) });
     } else {
-      pending.delete(req.milestoneId);
+      // After a review, the next read shows its outcome: by default paid.
+      const pr = milestones[req.milestoneId].state.HardFactsPassed?.pr;
       milestones[req.milestoneId] = { ...milestones[req.milestoneId], state: { Reviewing: {} } };
+      const outcome = reviewOutcomes.length ? reviewOutcomes.shift() : { Paid: { pr } };
+      pending.set(req.milestoneId, { reads: 0, next: outcome === 'retry' ? { HardFactsPassed: { pr } } : outcome });
     }
     return `tx-${sent.length}`;
   };
@@ -136,7 +139,6 @@ test('a checker that never finishes is given up after followMaxMs', async () => 
   await Promise.all(await r.auto.poll());
   assert.deepEqual(r.sent.map((s) => s.method), ['claim']);
   assert.ok(r.logs.some((l) => l.event === 'auto_claim_timeout'));
-  assert.ok(AUTO.followMaxMs <= 180_000);
 });
 
 test('github: sends the token and the ETag, and reuses the list on 304', async () => {
@@ -159,4 +161,24 @@ test('github: sends the token and the ETag, and reuses the list on 304', async (
 test('github: an error status throws, so the pass skips that repo', async () => {
   const closedPrs = makeGithub('t', { fetchImpl: async () => ({ status: 403, ok: false, headers: new Map() }) });
   await assert.rejects(closedPrs('o', 'r'), /github 403/);
+});
+
+test('a review that loses its second opinion is asked again, up to maxReviews', async () => {
+  const r = rig({ milestones: [milestone()], prs: [merged(15, START + 5_000)], reviewOutcomes: ['retry', 'retry'] });
+  await Promise.all(await r.auto.poll());
+  assert.deepEqual(r.sent.map((s) => s.method), ['claim', 'review', 'review', 'review']);
+  assert.ok(r.logs.some((l) => l.event === 'auto_claim_stopped' && l.state === 'Paid' && l.reviews === 3));
+});
+
+test('after maxReviews lost second opinions it stops asking', async () => {
+  const r = rig({ milestones: [milestone()], prs: [merged(16, START + 5_000)], reviewOutcomes: ['retry', 'retry', 'retry', 'retry'] });
+  await Promise.all(await r.auto.poll());
+  assert.equal(r.sent.filter((s) => s.method === 'review').length, AUTO.maxReviews);
+  assert.ok(r.logs.some((l) => l.event === 'auto_review_gave_up'));
+});
+
+test('a held review is left for the funder: no second review', async () => {
+  const r = rig({ milestones: [milestone()], prs: [merged(17, START + 5_000)], reviewOutcomes: [{ Held: { pr: 17 } }] });
+  await Promise.all(await r.auto.poll());
+  assert.deepEqual(r.sent.map((s) => s.method), ['claim', 'review']);
 });
