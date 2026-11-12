@@ -1,6 +1,6 @@
 // The landing page: a live caption and the AI decisions, read straight from the chain.
 import { loadIndex, stats, decisions } from './chain.mjs';
-import { $, h, shell, usdc, ago, verdictText, loading } from './ui.mjs';
+import { $, h, shell, usdc, ago, verdictText, loading, retryLabel } from './ui.mjs';
 
 shell('home', { landing: true });
 
@@ -12,7 +12,7 @@ function render(d) {
     ? h('span', { class: 'ps-state ps-state-paid' }, `CERTIFIED ${d.pct}%`)
     : d.held
       ? h('span', { class: 'ps-state ps-state-held' }, 'HELD FOR THE FUNDER')
-      : h('span', { class: 'ps-state ps-state-open' }, 'NO VERDICT, RETRYING');
+      : h('span', { class: 'ps-state ps-state-open' }, `${retryLabel(d)}, RETRYING`);
   const reason = d.reasons[0];
   return h('div', {},
     h('div', { class: 'ps-decision-line ps-caption' },

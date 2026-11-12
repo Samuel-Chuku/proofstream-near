@@ -2,7 +2,7 @@
 // the paid PRs, the AI decisions with their reasons, and every transaction.
 import { CONTRACT, PROJECTS, VERIFIER_PUBLIC_KEY, VERIFIER_FEE, OUTLAYER_API, GAS_300, RELAYER_ACCOUNT } from './config.mjs';
 import { loadIndex, stateOf, decisions, actor, getMilestone } from './chain.mjs';
-import { $, h, fill, shell, amount, usdc, txLink, short, problem, ago, loading, stateChip, sectionRule, verdictText } from './ui.mjs';
+import { $, h, fill, shell, amount, usdc, txLink, short, problem, ago, loading, stateChip, sectionRule, verdictText, retryLabel } from './ui.mjs';
 import * as wallet from './wallet.mjs';
 
 shell('app');
@@ -70,7 +70,7 @@ async function githubLogin(numericId) {
 
 function decisionCard(d, m) {
   const outcome = d.amount ? h('span', { class: 'ps-state ps-state-paid' }, `CERTIFIED ${d.pct}%`)
-    : d.held ? h('span', { class: 'ps-state ps-state-held' }, 'HELD') : h('span', { class: 'ps-state ps-state-open' }, 'NO VERDICT');
+    : d.held ? h('span', { class: 'ps-state ps-state-held' }, 'HELD') : h('span', { class: 'ps-state ps-state-open' }, retryLabel(d));
   const claim = d.verifierClaim && !d.verifierClaim.error ? d.verifierClaim : null;
   return h('details', { class: `ps-card${d.amount ? ' ps-card-paid' : ''}` },
     h('summary', {}, h('span', { class: 'ps-label' }, `PR #${d.pr}`), outcome,

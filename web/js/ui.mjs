@@ -93,6 +93,12 @@ export function titleMark() {
   return h('div', { class: 'ps-title-mark', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span'));
 }
 
+/// Why a review paid nothing and retried: the judge's own run failed, or the judge answered
+/// and only the verifier's second opinion was lost.
+export function retryLabel(d) {
+  return /^Failed/.test(d.judge ?? '') ? 'RUN FAILED' : 'SECOND OPINION LOST';
+}
+
 /// A state name as a chip. Green only when money was released.
 export function stateChip(name, m) {
   const paid = name === 'Paid' || (m && m.certified_pct > 0 && name === 'Funded');
