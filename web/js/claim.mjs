@@ -177,7 +177,7 @@ function claimStep(m, name, fields) {
   });
   box.replaceChildren(
     h('p', { class: 'ps-detail' }, name === 'Approved'
-      ? `Both AIs certified PR #${fields.pr} before it was merged. Merge it at commit ${fields.head_sha.slice(0, 8)}, then claim it again to be paid.`
+      ? `Both agents certified PR #${fields.pr} before it was merged. Merge it at commit ${fields.head_sha.slice(0, 8)}, then claim it again to be paid.`
       : `The PR must be merged into ${m.base_branch} of ${m.repo_owner}/${m.repo_name}, by someone else or with an independent approval${m.allow_self_merge ? ' (self-merge is allowed here)' : ''}, after this milestone was created, with ${m.required_checks.join(', ')} passing.`),
     h('div', { class: 'ps-actions' }, h('span', { class: 'ps-caption' }, 'PR #'), pr, send), out);
 }

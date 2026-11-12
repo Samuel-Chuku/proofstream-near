@@ -26,6 +26,10 @@ const running = new Set();
 let fetchesTotal = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = function guardedFetch(input, init = {}) {
+  // A build cut off by the platform (waitUntil stops after 30 s) never reaches its `finally`.
+  // Drop it once its deadline has passed, or its stale budget would refuse every later call.
+  const now = Date.now();
+  for (const c of running) if (c.deadline <= now) running.delete(c);
   let start = Infinity;
   let deadline = Infinity;
   for (const c of running) { start = Math.min(start, c.start); deadline = Math.min(deadline, c.deadline); }
@@ -63,7 +67,9 @@ export async function onRequestGet(context) {
   } catch (e) {
     // Answer with the reason rather than Cloudflare's bare error page; the pages then read the
     // chain themselves.
-    return new Response(JSON.stringify({ error: 'index_failed', message: String(e?.message ?? e) }), { status: 502, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    // 503, not 502: Cloudflare replaces a function's 502 body with its own error page.
+    console.error(JSON.stringify({ message: 'index build failed', error: String(e?.message ?? e) }));
+    return new Response(JSON.stringify({ error: 'index_failed', message: String(e?.message ?? e) }), { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
   }
 }
 

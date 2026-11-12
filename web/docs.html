@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>How it works · ProofStream</title>
-<meta name="description" content="How ProofStream on NEAR pays for verified work: the flow, the two AIs, what the contract guarantees, what is trusted, and how to check every claim.">
+<meta name="description" content="How ProofStream on NEAR pays for verified work: the flow, the two agents, what the contract guarantees, what is trusted, and how to check every claim.">
 <link rel="icon" href="assets/brand/proofstream-favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,7 +20,7 @@
     <p class="ps-caption">NEAR TESTNET · PROOFSTREAM-V1.TESTNET</p>
   </div></header>
 
-  <p class="ps-body">ProofStream pays contributors in USDC that sits in escrow against one milestone of a GitHub repository, and stays locked until the work is checked twice: the hard facts of the merged pull request, read inside an Intel TDX enclave, and the work itself, judged by two AIs from different vendors. The contract pays the lower of the two shares. No human approves a payment, and no AI can release one alone.</p>
+  <p class="ps-body">ProofStream pays contributors in USDC that sits in escrow against one milestone of a GitHub repository, and stays locked until the work is checked twice: the hard facts of the merged pull request, read inside an Intel TDX enclave, and the work itself, judged by two agents running models from different vendors. The contract pays the lower of the two shares. No human approves a payment, and no agent can release one alone.</p>
 
   <div class="ps-section-rule"><h2 class="ps-label">The shape of it</h2></div>
   <ol class="ps-flow">
@@ -71,8 +71,8 @@
   <div class="ps-section-rule"><h2 class="ps-label">What the bar means</h2></div>
   <p class="ps-body">Every milestone page carries a bar of 50 cells, each 2% of the budget. Green means one thing everywhere in this interface: USDC the contract has paid out.</p>
   <div class="ps-legend">
-    <div><span class="ps-swatch-l ps-fill-unlocked"></span><span class="ps-label">Paid</span><span class="ps-detail">certified by both AIs and sent to the contributor's account</span></div>
-    <div><span class="ps-swatch-l ps-fill-valued"></span><span class="ps-label">Certified, pays at merge</span><span class="ps-detail">both AIs approved an open PR; it pays when merged at that exact commit</span></div>
+    <div><span class="ps-swatch-l ps-fill-unlocked"></span><span class="ps-label">Paid</span><span class="ps-detail">certified by both agents and sent to the contributor's account</span></div>
+    <div><span class="ps-swatch-l ps-fill-valued"></span><span class="ps-label">Certified, pays at merge</span><span class="ps-detail">both agents approved an open PR; it pays when merged at that exact commit</span></div>
     <div><span class="ps-swatch-l ps-fill-locked"></span><span class="ps-label">Locked</span><span class="ps-detail">still in escrow, waiting for work</span></div>
     <div><span class="ps-swatch-l ps-fill-unaccrued"></span><span class="ps-label">Returned</span><span class="ps-detail">after the deadline the funder took back what was never certified</span></div>
   </div>
@@ -99,12 +99,12 @@
     <figcaption class="ps-caption">Held can only be released (a share the funder picks) or rejected (back to Funded, with the reason on-chain). Refunds open after the deadline.</figcaption>
   </figure>
 
-  <div class="ps-section-rule"><h2 class="ps-label">How the two AIs decide</h2></div>
+  <div class="ps-section-rule"><h2 class="ps-label">How the two agents decide</h2></div>
   <div class="ps-two">
     <section>
       <h3 class="ps-ai-title">The rules</h3>
       <ul class="ps-numbered ps-detail">
-        <li>Each AI answers <em>meets</em> (100%), <em>partial</em> (1–99%), <em>does not meet</em> or <em>unclear</em>. A verdict that disagrees with its own percent is no verdict.</li>
+        <li>Each agent answers <em>meets</em> (100%), <em>partial</em> (1–99%), <em>does not meet</em> or <em>unclear</em>. A verdict that disagrees with its own percent is no verdict.</li>
         <li>Any objection holds the money for the funder. So do two shares more than 30 points apart, and a share that adds nothing new.</li>
         <li>Otherwise the lower share is certified. Certified only rises, and each payment is the newly certified part.</li>
         <li>Both see the earlier paid pull requests, marked as paid, so redoing paid work earns nothing.</li>
@@ -129,7 +129,7 @@
 
   <div class="ps-section-rule"><h2 class="ps-label">What is attested, checked and trusted</h2></div>
   <dl class="ps-sheet">
-    <dt>Attested</dt><dd class="ps-detail">Each run's TDX quote binds the project id, the wasm hash that ran, and the input and output. The AI's role comes from the OutLayer project the contract called. The worker sets it, and neither the input nor the secrets can change it. The project id, the wasm hash, the input and the output (which echoes the role) are all bound into the execution's TDX quote. The contract refuses a verdict from the wrong role; the quote itself is checked off-chain, by anyone, with <code>scripts/verify-execution.py</code>, not by the contract.</dd>
+    <dt>Attested</dt><dd class="ps-detail">Each run's TDX quote binds the project id, the wasm hash that ran, and the input and output. The agent's role comes from the OutLayer project the contract called. The worker sets it, and neither the input nor the secrets can change it. The project id, the wasm hash, the input and the output (which echoes the role) are all bound into the execution's TDX quote. The contract refuses a verdict from the wrong role; the quote itself is checked off-chain, by anyone, with <code>scripts/verify-execution.py</code>, not by the contract.</dd>
     <dt>Checked on-chain</dt><dd class="ps-detail">Every rule and payout; the verifier's signature; that results come from a worker whose key was added only after its TDX quote passed.</dd>
     <dt>Checked by anyone</dt><dd class="ps-detail">Each execution's quote, down to Intel's signature: <code>python3 -I scripts/verify-execution.py &lt;tx&gt;</code>.</dd>
     <dt>Trusted</dt><dd class="ps-detail">GitHub's API for the facts; OutLayer's measurement allowlist and keystore; NEAR AI's TEE and its signing key; the people who merge. The verifier's key belongs to its project, so a new version published by its owner would sign with the same key.</dd>
@@ -145,7 +145,7 @@ python3 -I scripts/verify-execution.py &lt;tx hash&gt;     # one run's TDX quote
   <div class="ps-section-rule"><h2 class="ps-label">Limitations, named</h2></div>
   <ul class="ps-numbered ps-detail">
     <li><strong>The judge and verifier are run by the same people for now.</strong> They are independent in keys, accounts and models, not in operator.</li>
-    <li><strong>A contributor can weaken their own tests.</strong> The AIs are told to look for it, and can miss it.</li>
+    <li><strong>A contributor can weaken their own tests.</strong> The agents are told to look for it, and can miss it.</li>
     <li><strong>A second GitHub account defeats the independent-approval rule.</strong></li>
     <li><strong>Partial shares are a model's estimate,</strong> bounded by two models, the lower one and the 30-point gap.</li>
     <li><strong>A funder who disagrees can reject, and refund after the deadline.</strong> The contributor's protection is the milestone text and deadline they read before starting, and the public record of every rejection and its reason.</li>

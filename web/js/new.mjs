@@ -166,7 +166,7 @@ function blockers() {
   const checks = f('checks').value.split(',').map((c) => c.trim()).filter(Boolean);
   if (checks.length < 1 || checks.length > 8) out.terms.push('Name 1 to 8 required checks.');
   const text = f('text').value.trim();
-  if (!text) out.terms.push('Write the milestone: it is what both AIs judge against.');
+  if (!text) out.terms.push('Write the milestone: it is what both agents judge against.');
   const deadline = Date.parse(f('deadline').value);
   if (!Number.isFinite(deadline) || deadline / 1000 < Date.now() / 1000 + state.minDeadlineS + 60) out.terms.push(`The deadline must be at least ${Math.ceil(state.minDeadlineS / 60) + 1} minutes away.`);
   return out;

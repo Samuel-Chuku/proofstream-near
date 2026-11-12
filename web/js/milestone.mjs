@@ -15,7 +15,7 @@ const STATE_TEXT = {
   Checking: 'The checker is reading GitHub inside TDX.',
   HardFactsPassed: 'The hard facts passed. Waiting for the review.',
   Reviewing: 'The judge is reviewing, then buying the verifier\'s signed opinion.',
-  Approved: 'Both AIs certified the open pull request. It pays once merged at that exact commit.',
+  Approved: 'Both agents certified the open pull request. It pays once merged at that exact commit.',
   Held: 'Held for the funder: an objection, a disagreement, or no new progress. The funder can release a share or reject the pull request.',
   PayingOut: 'Paying out.',
   PayoutFailed: 'The payout transfer failed. Anyone may retry it.',
@@ -161,7 +161,7 @@ function evidence(index, m) {
     txs: [h('p', { class: 'ps-caption' }, 'NEWEST FIRST · EVERY ROW LINKS TO NEARBLOCKS, SO NOTHING HERE HAS TO BE TAKEN ON TRUST'),
       h('p', { class: 'ps-subhead' }, 'By the contract, the relayer and the contributor'), txRows(automated),
       h('p', { class: 'ps-subhead' }, 'By the funder'), txRows(human)],
-    fee: [h('p', { class: 'ps-body' }, h('strong', {}, `${usdc(BigInt(VERIFIER_FEE) * BigInt(opinions))} USDC`), ` for ${opinions} second opinion${opinions === 1 ? '' : 's'}, from the judge owner's OutLayer payment key to the verifier's owner: one AI paying another for a service. Each review pays the judge's owner that fee from the milestone's review budget; the judge passes it on only when it asks for a second opinion.`),
+    fee: [h('p', { class: 'ps-body' }, h('strong', {}, `${usdc(BigInt(VERIFIER_FEE) * BigInt(opinions))} USDC`), ` for ${opinions} second opinion${opinions === 1 ? '' : 's'}, from the judge owner's OutLayer payment key to the verifier's owner: one agent paying another for a service. Each review pays the judge's owner that fee from the milestone's review budget; the judge passes it on only when it asks for a second opinion.`),
       h('p', { class: 'ps-caption' }, `${refused} REVIEW${refused === 1 ? '' : 'S'} WHERE THE JUDGE OBJECTED: NO SECOND OPINION BOUGHT, THE FEE STAYED WITH THE JUDGE'S OWNER`)],
   };
 }
@@ -234,9 +234,9 @@ async function main() {
       h('dt', {}, 'Self-merge'), h('dd', {}, m.allow_self_merge ? 'allowed' : 'needs another person to merge or approve the exact commit'),
       h('dt', {}, 'Second opinion'), h('dd', {}, `${usdc(VERIFIER_FEE)} USDC per review, from the fee budget`),
       h('dt', {}, 'Funder'), h('dd', {}, m.funder),
-      h('dt', {}, 'Pinned code'), h('dd', { class: 'ps-mono-id' }, `checker ${short(m.pins.checker.wasm_hash, 12)} · binder ${short(m.pins.binder.wasm_hash, 12)} · AI ${short(m.pins.judge.wasm_hash, 12)} · verifier key ${short(m.pins.verifier.public_key, 12)}`)),
+      h('dt', {}, 'Pinned code'), h('dd', { class: 'ps-mono-id' }, `checker ${short(m.pins.checker.wasm_hash, 12)} · binder ${short(m.pins.binder.wasm_hash, 12)} · judge ${short(m.pins.judge.wasm_hash, 12)} · verifier key ${short(m.pins.verifier.public_key, 12)}`)),
     sectionRule('Paid pull requests'), prs,
-    sectionRule('AI decisions'), ai,
+    sectionRule('Agent decisions'), ai,
     sectionRule('On-chain transactions'), txs,
     sectionRule('What the judge paid the verifier'), fee);
 

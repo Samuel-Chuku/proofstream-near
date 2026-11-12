@@ -23,7 +23,7 @@ function renderStats() {
     statCell(String(s.milestones), 'Milestones'),
     statCell(amount(s.escrowed, 'xl'), 'USDC escrowed'),
     statCell(amount(s.paid, 'xl'), 'USDC paid to contributors'),
-    statCell(String(s.reviews), 'AI reviews'),
+    statCell(String(s.reviews), 'Agent reviews'),
     statCell(String(s.secondOpinions), 'Second opinions bought'),
     statCell(String(s.refusals), 'Refused or held')));
 }
