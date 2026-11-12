@@ -1,6 +1,6 @@
 // Reading NEAR: contract views over JSON-RPC, a transaction's events, and the contract's
 // transaction list from NearBlocks. No wallet needed for any of it.
-import { CONTRACT, RPC, NEARBLOCKS, RELAYER, TOKEN } from './config.mjs';
+import { CONTRACT, RPC, NEARBLOCKS, FASTNEAR_TX, RELAYER, TOKEN } from './config.mjs';
 
 const TIMEOUT_MS = 15000;
 
@@ -114,7 +114,7 @@ export async function txEvents(hash) {
   return (await txDetail(hash)).events;
 }
 
-/// Every transaction that touched the contract, newest first, from NearBlocks. Its list of
+/// The NearBlocks fallback. Its list of
 /// direct transactions misses funding (a transfer to the token that calls back into the
 /// contract), so recent receipts are merged in to catch those. NearBlocks pages at 100.
 const PAGE = 100;
@@ -126,7 +126,41 @@ async function nearblocks(path) {
   return res.json();
 }
 
+/// Every transaction that touched the contract, newest first. FastNEAR's transactions API lists
+/// them all in one call, including funding that reaches the contract through the token; NearBlocks
+/// is the fallback (it rate-limits shared hosts such as Cloudflare's).
 export async function contractTxns() {
+  try {
+    return await fastnearTxns();
+  } catch {
+    return nearblocksTxns();
+  }
+}
+
+async function fastnearTxns() {
+  const seen = new Map();
+  let maxHeight = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await fetch(FASTNEAR_TX, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: CONTRACT, ...(maxHeight ? { max_block_height: maxHeight } : {}) }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`fastnear ${res.status}`);
+    const body = await res.json();
+    const rows = body.account_txs || [];
+    const before = seen.size;
+    for (const t of rows) if (t.transaction_hash && !seen.has(t.transaction_hash)) seen.set(t.transaction_hash, BigInt(t.tx_block_timestamp ?? 0));
+    // Pages overlap at their boundary height; stop when one adds nothing or the count is reached.
+    if (seen.size === before || seen.size >= (body.txs_count ?? 0) || !rows.length) break;
+    maxHeight = Math.min(...rows.map((t) => t.tx_block_height));
+  }
+  if (!seen.size) throw new Error('fastnear returned no transactions');
+  return [...seen].map(([hash, ns]) => ({ hash, ns })).sort((a, b) => (a.ns > b.ns ? -1 : a.ns < b.ns ? 1 : 0));
+}
+
+async function nearblocksTxns() {
   const seen = new Map();
   const add = (hash, ns) => { if (hash && !seen.has(hash)) seen.set(hash, BigInt(ns ?? 0)); };
   let cursor = null;

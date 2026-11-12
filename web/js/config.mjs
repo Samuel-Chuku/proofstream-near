@@ -6,6 +6,7 @@ export const RELAYER = 'https://relayer.proofstream.site';
 // FastNEAR's archival node first (generous limits, every transaction), then NEAR's own.
 export const RPC = ['https://archival-rpc.testnet.fastnear.com', 'https://rpc.testnet.near.org', 'https://archival-rpc.testnet.near.org'];
 export const NEARBLOCKS = 'https://api-testnet.nearblocks.io/v3';
+export const FASTNEAR_TX = 'https://tx.test.fastnear.com/v0/account';
 export const OUTLAYER_API = 'https://testnet-api.outlayer.ai';
 export const EXPLORER_TX = (hash) => `https://testnet.nearblocks.io/txns/${hash}`;
 export const ARC_SITE = 'https://proofstream.site';

@@ -94,7 +94,15 @@ async function serve(context) {
     waitUntil(rebuild(cache, keys, known).then((r) => r.puts));
     return json(JSON.stringify({ ...last, stale: true }), 0);
   }
-  const { body, puts } = await rebuild(cache, keys, known);
-  waitUntil(puts);
-  return json(body, INDEX_TTL_S);
+  let built;
+  try {
+    built = await rebuild(cache, keys, known);
+  } catch (e) {
+    // A provider is down or rate-limiting: the last complete history beats no history.
+    if (!last) throw e;
+    console.error(JSON.stringify({ message: 'rebuild failed, serving the last index', error: String(e?.message ?? e) }));
+    return json(JSON.stringify({ ...last, stale: true }), 0);
+  }
+  waitUntil(built.puts);
+  return json(built.body, INDEX_TTL_S);
 }
