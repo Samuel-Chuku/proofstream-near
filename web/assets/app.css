@@ -191,7 +191,7 @@ textarea.ps-input { font-size: var(--ps-size-body); line-height: var(--ps-lh-bod
 
 /* ---- State chips: green only when money was released ---- */
 .ps-state { display: inline-block; font-size: var(--ps-size-label); letter-spacing: var(--ps-track-label); text-transform: uppercase; padding: 2px var(--ps-2); border: var(--ps-bw-hair) solid var(--ps-rule); white-space: nowrap; }
-.ps-state-paid { background: var(--ps-green); color: var(--ps-on-green); border-color: var(--ps-green-deep); }
+.ps-state-paid { background: var(--ps-green); color: var(--ps-on-green); border-color: var(--ps-green-deep); font-weight: 700; }
 .ps-state-held { background: var(--ps-invert-bg); color: var(--ps-invert-ink); }
 .ps-state-open { background: var(--ps-dither-25); }
 .ps-state-closed { color: var(--ps-ink-faint); border-color: var(--ps-ink-faint); }

@@ -38,21 +38,41 @@ function checking(text) {
 /// The last transaction each step sent from this page, so its link stays after it confirms.
 const sent = {};
 
-/// Each finished step's transaction, from what this page sent or else from the chain index.
+/// A step's transaction, from what this page sent or else from the chain index. The shared
+/// index can trail the chain by a rebuild, so it is asked again until the transaction shows up.
 const STEP_EVENTS = {
   bind_payee: ['payee_bound'],
   claim: ['hard_facts_passed'],
+  claim_started: ['claim_started'],
   review: ['milestone_paid', 'payout_started', 'certified'],
+  review_started: ['review_started'],
 };
+const TX_LOOKUPS = 12;
+const TX_LOOKUP_MS = 10000;
 let indexP = null;
+async function attachTx(el, method) {
+  const own = sent[method === 'claim_started' ? 'claim' : method === 'review_started' ? 'review' : method];
+  if (own) { el.append(' ', txLink(own)); return; } // the step's own transaction, sent from this page
+  for (let i = 0; i < TX_LOOKUPS; i++) {
+    if (i > 0 && !el.isConnected) return; // redrawn since: the new line looks for itself
+    try {
+      indexP = i === 0 && indexP ? indexP : loadIndex({ fresh: i > 0 });
+      const index = await indexP;
+      const t = index.txs.find((x) => x.events.some((e) => e.milestone_id === Number(id) && STEP_EVENTS[method].includes(e.event)));
+      if (t) { el.append(' ', txLink(t.hash)); return; }
+    } catch { /* no index this time */ }
+    await new Promise((r) => setTimeout(r, TX_LOOKUP_MS));
+  }
+}
 function doneLine(method, text) {
-  const line = h('p', { class: 'ps-detail ps-done-line' }, text, ' ');
-  if (sent[method]) { line.append(txLink(sent[method])); return line; }
-  indexP ??= loadIndex();
-  indexP.then((index) => {
-    const t = index.txs.find((x) => x.events.some((e) => e.milestone_id === Number(id) && STEP_EVENTS[method].includes(e.event)));
-    if (t) line.append(txLink(t.hash));
-  }).catch(() => { /* no index: the text stands alone */ });
+  const line = h('p', { class: 'ps-detail ps-done-line' }, text);
+  attachTx(line, method);
+  return line;
+}
+/// A step still running: the green working strip, its text, and its transaction once known.
+function working(text, method) {
+  const line = checking(text);
+  if (method) attachTx(line, method);
   return line;
 }
 
@@ -82,7 +102,10 @@ async function step(box, method, body, busyStates, waitingText) {
 async function githubSession() {
   try {
     const r = await fetch('/api/github/me', { credentials: 'same-origin' });
-    if (r.status === 200) return { state: 'in', ...(await r.json()) };
+    if (r.status === 200) {
+      const me = await r.json();
+      if (me && me.login && Number.isSafeInteger(me.id)) return { state: 'in', ...me };
+    }
     if (r.status === 401) return { state: 'out' };
   } catch { /* no functions here (local server): manual steps only */ }
   return { state: 'off' };
@@ -175,15 +198,21 @@ async function bindStep(m, nonce) {
     out);
 }
 
+/// The manual way, folded away: the relayer claims and asks for the review by itself, so these
+/// are only a fallback (a PR that names no milestone when several fit, or auto-claim being off).
+function byHand(label, ...body) {
+  return h('details', { class: 'ps-section' }, h('summary', {}, h('span', { class: 'ps-caption' }, label)), ...body);
+}
+
 function claimStep(m, name, fields) {
   const box = $('#claim');
   if (!m.payee) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'after binding')); return; }
   if (['HardFactsPassed', 'Reviewing', 'Held', 'PayingOut', 'Paid', 'PayoutFailed'].includes(name)) {
     $('#step-claim').classList.add('ps-step-done');
-    box.replaceChildren(doneLine('claim', fields.pr ? `PR #${fields.pr} passed the hard facts.` : 'Done.'));
+    box.replaceChildren(doneLine('claim', fields.pr ? `PR #${fields.pr} passed the hard facts: merged, right author, checks passed.` : 'Done.'));
     return;
   }
-  if (name === 'Checking') { box.replaceChildren(checking(`The checker is reading PR #${fields.pr}…`)); return; }
+  if (name === 'Checking') { box.replaceChildren(working(`The checker is reading PR #${fields.pr} inside TDX…`, 'claim_started')); return; }
   if (name === 'Refunded' || name === 'Funding') { box.replaceChildren(h('p', { class: 'ps-detail' }, name === 'Funding' ? 'Waiting for the funder to deposit.' : 'This milestone was refunded.')); return; }
   const pr = h('input', { class: 'ps-input ps-input-short', inputmode: 'numeric', value: fields.pr ?? '', 'aria-label': 'Pull request number' });
   const out = h('div');
@@ -198,12 +227,16 @@ function claimStep(m, name, fields) {
     if (refused) { out.replaceChildren(problem(explain(refused.reason)), txLink(r.tx)); return; }
     load();
   });
-  box.replaceChildren(...[
-    h('p', { class: 'ps-detail' }, name === 'Approved'
-      ? `Both agents certified PR #${fields.pr} before it was merged. Merge it at commit ${fields.head_sha.slice(0, 8)}, then claim it again to be paid.`
-      : `The PR must be merged into ${m.base_branch} of ${m.repo_owner}/${m.repo_name}, by someone else or with an independent approval${m.allow_self_merge ? ' (self-merge is allowed here)' : ''}, after this milestone was created, with ${m.required_checks.join(', ')} passing.`),
-    name === 'Funded' ? h('p', { class: 'ps-caption' }, `Merged PRs from this milestone's GitHub account are claimed for you within about 15 s. With more than one open milestone in this repo, write "ProofStream #${id}" in the PR description. Or claim one here:`) : null,
-    h('div', { class: 'ps-actions' }, h('span', { class: 'ps-caption' }, 'PR #'), pr, send), out].filter(Boolean));
+  const rules = h('p', { class: 'ps-detail' }, name === 'Approved'
+    ? `Both agents certified PR #${fields.pr} before it was merged. Merge it at commit ${fields.head_sha.slice(0, 8)}, then claim it again to be paid.`
+    : `The PR must be merged into ${m.base_branch} of ${m.repo_owner}/${m.repo_name}, by someone else or with an independent approval${m.allow_self_merge ? ' (self-merge is allowed here)' : ''}, after this milestone was created, with ${m.required_checks.join(', ')} passing.`);
+  const manual = [h('div', { class: 'ps-actions' }, h('span', { class: 'ps-caption' }, 'PR #'), pr, send), out];
+  if (name === 'Approved') { box.replaceChildren(rules, ...manual); return; }
+  box.replaceChildren(
+    working('Waiting for a merged PR: the relayer claims it within about 15 s of the merge.'),
+    rules,
+    h('p', { class: 'ps-caption' }, `With more than one open milestone in this repo, write "ProofStream #${id}" in the PR description.`),
+    byHand('CLAIM BY HAND', ...manual));
 }
 
 function reviewStep(m, name, fields) {
@@ -214,9 +247,9 @@ function reviewStep(m, name, fields) {
     return;
   }
   if (name === 'Held') { box.replaceChildren(h('p', { class: 'ps-detail' }, `Held for the funder: ${fields.reason}.`)); return; }
-  if (name === 'Reviewing') { box.replaceChildren(checking('The judge and the verifier are reviewing…')); return; }
+  if (name === 'Reviewing') { box.replaceChildren(working('The judge reviews, then buys the verifier\'s signed opinion (20–90 s)…', 'review_started')); return; }
   if (name !== 'HardFactsPassed') {
-    box.replaceChildren(h('p', { class: 'ps-caption' }, m.certified_pct > 0 ? `${m.certified_pct}% certified so far; claim your next PR for the rest` : 'after the claim'));
+    box.replaceChildren(h('p', { class: 'ps-caption' }, m.certified_pct > 0 ? `${m.certified_pct}% certified so far; the next merged PR is claimed for the rest` : 'after the claim'));
     return;
   }
   const out = h('div');
@@ -238,7 +271,10 @@ function reviewStep(m, name, fields) {
       txLink(r.tx)].filter(Boolean));
     if (paid) load();
   });
-  box.replaceChildren(h('p', { class: 'ps-detail' }, 'The lower of the two shares is paid. An objection, or shares more than 30 points apart, holds the money for the funder.'), h('div', { class: 'ps-actions' }, send), out);
+  box.replaceChildren(
+    working(m.paid_attempts_used > 0 ? 'The last review lost its second opinion; the relayer asks again…' : 'The relayer asks the two agents for their review…'),
+    h('p', { class: 'ps-detail' }, 'The lower of the two shares is paid. An objection, or shares more than 30 points apart, holds the money for the funder.'),
+    byHand('ASK BY HAND', h('div', { class: 'ps-actions' }, send), out));
 }
 
 /// While the relayer might act on its own (auto-claim, then the review), re-read the milestone
@@ -280,9 +316,18 @@ async function myClaims() {
     if (!who.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'Connect a wallet or sign in with GitHub to list your claims.')); return; }
     box.replaceChildren(h('p', { class: 'ps-caption' }, `READING THE CONTRACT FOR ${who.join(' · ')}…`));
     let all;
+    // The shared index picks the candidates in one request; each is then read live, since the
+    // index can trail the chain (a payout or a bind a minute old). Milestones newer than the
+    // index, and unbound ones that may have just been bound, are candidates too.
     try {
       indexP ??= loadIndex();
-      all = (await indexP).milestones; // the site's shared index: one request, not one per milestone
+      const listed = (await indexP).milestones;
+      const ids = listed.filter((m) => !m.payee || m.payee.account === acct || (gh.state === 'in' && m.payee_github_id === gh.id)).map((m) => m.id);
+      for (let next = listed.length; next < listed.length + 20; next++) {
+        if (!(await getMilestone(next))) break;
+        ids.push(next);
+      }
+      all = (await Promise.all(ids.map(async (i) => ({ id: i, ...(await getMilestone(i)) })))).filter((m) => m.repo_owner);
     } catch {
       try { all = await readMilestones(); } catch (e) { box.replaceChildren(problem(`Couldn't read the contract: ${e.message}`)); return; }
     }

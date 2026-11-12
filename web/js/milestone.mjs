@@ -178,6 +178,9 @@ function prTable(m, mine) {
     })));
 }
 
+const HISTORY_RETRIES = 8;
+const HISTORY_RETRY_MS = 15000;
+
 async function main() {
   page.replaceChildren(loading('READING THE MILESTONE'));
   if (id === null || !/^\d+$/.test(id)) { location.replace('app.html#milestones'); return; }
@@ -250,12 +253,23 @@ async function main() {
     if (login) contributor.replaceChildren(h('a', { href: `https://github.com/${login}`, target: '_blank', rel: 'noopener' }, login), ` (GitHub id ${m.payee_github_id})`);
   });
 
-  try {
-    const e = evidence(await indexP, m);
+  const show = (index) => {
+    const e = evidence(index, m);
     prs.replaceChildren(e.prs);
     fill(ai, ...e.ai);
     fill(txs, ...e.txs);
     fill(fee, ...e.fee);
+  };
+  try {
+    let index = await indexP;
+    show(index);
+    // The shared index answers with its last copy while it rebuilds, so a run that just happened
+    // can be missing. Ask again until the copy is current, and redraw with each newer one.
+    for (let i = 0; i < HISTORY_RETRIES && (index.stale || index.unread); i++) {
+      await new Promise((r) => setTimeout(r, HISTORY_RETRY_MS));
+      index = await loadIndex({ fresh: true }).catch(() => index);
+      show(index);
+    }
   } catch (err) {
     const msg = problem(`Couldn't read the transaction history: ${err.message}`, 'The milestone above is read live from the contract. Reload to try the history again.', 'HISTORY UNAVAILABLE');
     ai.replaceChildren(msg); txs.replaceChildren(); fee.replaceChildren();
