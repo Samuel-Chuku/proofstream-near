@@ -237,8 +237,15 @@ async function submit(ev) {
 }
 
 async function init() {
-  const local = new Date(Date.now() + 7 * 86400_000 - new Date().getTimezoneOffset() * 60_000);
-  f('deadline').value = local.toISOString().slice(0, 16);
+  // Quick pick: 1, 7, 14 or 30 days from now fills the deadline; editing it by hand shows Custom.
+  const quick = $('#deadline-quick');
+  const inDays = (days) => {
+    const local = new Date(Date.now() + days * 86400_000 - new Date().getTimezoneOffset() * 60_000);
+    f('deadline').value = local.toISOString().slice(0, 16);
+  };
+  inDays(Number(quick.value));
+  quick.addEventListener('change', () => { if (quick.value) { inDays(Number(quick.value)); refresh(); } });
+  f('deadline').addEventListener('input', () => { quick.value = ''; });
   state.builds = Object.fromEntries((await (await fetch('builds.json')).json()).map((b) => [b.project, b.sha256]));
   state.minDeadlineS = (await getConfig().catch(() => null))?.min_deadline_seconds ?? state.minDeadlineS;
   f('contributor').addEventListener('change', lookContributor);

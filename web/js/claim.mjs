@@ -2,8 +2,9 @@
 // claim with a merged PR, then ask for the review. Each step waits for the chain and says why
 // if the contract refused.
 import { CONTRACT } from './config.mjs';
-import { getMilestone, getBindNonce, relay, txEvents, stateOf } from './chain.mjs';
-import { $, h, shell, usdc, copyChip, problem, until, txLink } from './ui.mjs';
+import { getMilestone, getBindNonce, relay, txEvents, stateOf, loadIndex, readMilestones } from './chain.mjs';
+import { $, h, shell, usdc, copyChip, problem, until, txLink, stateChip } from './ui.mjs';
+import * as wallet from './wallet.mjs';
 
 shell('claim');
 const id = new URLSearchParams(location.search).get('id');
@@ -34,6 +35,27 @@ function checking(text) {
   return h('p', { class: 'ps-checking ps-detail' }, h('span', { class: 'ps-checking-cells', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span')), text);
 }
 
+/// The last transaction each step sent from this page, so its link stays after it confirms.
+const sent = {};
+
+/// Each finished step's transaction, from what this page sent or else from the chain index.
+const STEP_EVENTS = {
+  bind_payee: ['payee_bound'],
+  claim: ['hard_facts_passed'],
+  review: ['milestone_paid', 'payout_started', 'certified'],
+};
+let indexP = null;
+function doneLine(method, text) {
+  const line = h('p', { class: 'ps-detail ps-done-line' }, text, ' ');
+  if (sent[method]) { line.append(txLink(sent[method])); return line; }
+  indexP ??= loadIndex();
+  indexP.then((index) => {
+    const t = index.txs.find((x) => x.events.some((e) => e.milestone_id === Number(id) && STEP_EVENTS[method].includes(e.event)));
+    if (t) line.append(txLink(t.hash));
+  }).catch(() => { /* no index: the text stands alone */ });
+  return line;
+}
+
 /// Sends through the relayer, then waits until the milestone leaves `busy` states.
 async function step(box, method, body, busyStates, waitingText) {
   box.replaceChildren(checking('Sending through the relayer…'));
@@ -44,6 +66,7 @@ async function step(box, method, body, busyStates, waitingText) {
     box.replaceChildren(problem(explain(e.reason || e.message), e.tx ? `transaction ${e.tx}` : null));
     return null;
   }
+  sent[method] = tx;
   box.replaceChildren(checking(waitingText), txLink(tx));
   const m = await until(async () => {
     const now = await getMilestone(Number(id));
@@ -69,7 +92,7 @@ async function bindStep(m, nonce) {
   const box = $('#bind');
   if (m.payee) {
     $('#step-bind').classList.add('ps-step-done');
-    box.replaceChildren(h('p', { class: 'ps-detail' }, `Payouts go to ${m.payee.account}, set by gist ${m.payee.gist_id}.`));
+    box.replaceChildren(doneLine('bind_payee', `Payouts go to ${m.payee.account}, set by gist ${m.payee.gist_id}.`));
     return;
   }
   const gh = await githubSession();
@@ -157,7 +180,7 @@ function claimStep(m, name, fields) {
   if (!m.payee) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'after binding')); return; }
   if (['HardFactsPassed', 'Reviewing', 'Held', 'PayingOut', 'Paid', 'PayoutFailed'].includes(name)) {
     $('#step-claim').classList.add('ps-step-done');
-    box.replaceChildren(h('p', { class: 'ps-detail' }, fields.pr ? `PR #${fields.pr} passed the hard facts.` : 'Done.'));
+    box.replaceChildren(doneLine('claim', fields.pr ? `PR #${fields.pr} passed the hard facts.` : 'Done.'));
     return;
   }
   if (name === 'Checking') { box.replaceChildren(checking(`The checker is reading PR #${fields.pr}…`)); return; }
@@ -175,18 +198,19 @@ function claimStep(m, name, fields) {
     if (refused) { out.replaceChildren(problem(explain(refused.reason)), txLink(r.tx)); return; }
     load();
   });
-  box.replaceChildren(
+  box.replaceChildren(...[
     h('p', { class: 'ps-detail' }, name === 'Approved'
       ? `Both agents certified PR #${fields.pr} before it was merged. Merge it at commit ${fields.head_sha.slice(0, 8)}, then claim it again to be paid.`
       : `The PR must be merged into ${m.base_branch} of ${m.repo_owner}/${m.repo_name}, by someone else or with an independent approval${m.allow_self_merge ? ' (self-merge is allowed here)' : ''}, after this milestone was created, with ${m.required_checks.join(', ')} passing.`),
-    h('div', { class: 'ps-actions' }, h('span', { class: 'ps-caption' }, 'PR #'), pr, send), out);
+    name === 'Funded' ? h('p', { class: 'ps-caption' }, `Merged PRs from this milestone's GitHub account are claimed for you within about 15 s. With more than one open milestone in this repo, write "ProofStream #${id}" in the PR description. Or claim one here:`) : null,
+    h('div', { class: 'ps-actions' }, h('span', { class: 'ps-caption' }, 'PR #'), pr, send), out].filter(Boolean));
 }
 
 function reviewStep(m, name, fields) {
   const box = $('#review');
   if (name === 'Paid' || name === 'PayingOut') {
     $('#step-review').classList.add('ps-step-done');
-    box.replaceChildren(h('p', { class: 'ps-detail' }, `Certified ${m.certified_pct}%. ${usdc(BigInt(m.budget_total) - BigInt(m.budget))} USDC paid to ${m.payee.account}.`));
+    box.replaceChildren(doneLine('review', `Certified ${m.certified_pct}%. ${usdc(BigInt(m.budget_total) - BigInt(m.budget))} USDC paid to ${m.payee.account}.`));
     return;
   }
   if (name === 'Held') { box.replaceChildren(h('p', { class: 'ps-detail' }, `Held for the funder: ${fields.reason}.`)); return; }
@@ -217,6 +241,19 @@ function reviewStep(m, name, fields) {
   box.replaceChildren(h('p', { class: 'ps-detail' }, 'The lower of the two shares is paid. An objection, or shares more than 30 points apart, holds the money for the funder.'), h('div', { class: 'ps-actions' }, send), out);
 }
 
+/// While the relayer might act on its own (auto-claim, then the review), re-read the milestone
+/// every few seconds and redraw when its state changes.
+const WATCH_MS = 5000;
+let watching = null;
+function watchState(m, name) {
+  clearInterval(watching);
+  if (!m.payee || !['Funded', 'Checking', 'HardFactsPassed', 'Reviewing', 'PayingOut'].includes(name)) return;
+  watching = setInterval(async () => {
+    const now = await getMilestone(Number(id)).catch(() => null);
+    if (now && stateOf(now)[0] !== name) { clearInterval(watching); load(); }
+  }, WATCH_MS);
+}
+
 async function load() {
   const m = await getMilestone(Number(id));
   if (!m) { $('#flow').replaceChildren(problem(`There is no milestone #${id} on ${CONTRACT}.`)); return; }
@@ -231,7 +268,39 @@ async function load() {
   await bindStep(m, await getBindNonce(Number(id)));
   claimStep(m, name, fields);
   reviewStep(m, name, fields);
+  watchState(m, name);
 }
+
+/// Every milestone paying the connected wallet, or the signed-in GitHub account, each linking to its page.
+async function myClaims() {
+  const box = $('#mine-list');
+  const gh = await githubSession();
+  const show = async (acct) => {
+    const who = [acct, gh.state === 'in' ? `GitHub ${gh.login}` : null].filter(Boolean);
+    if (!who.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'Connect a wallet or sign in with GitHub to list your claims.')); return; }
+    box.replaceChildren(h('p', { class: 'ps-caption' }, `READING THE CONTRACT FOR ${who.join(' · ')}…`));
+    let all;
+    try { all = await readMilestones(); } catch (e) { box.replaceChildren(problem(`Couldn't read the contract: ${e.message}`)); return; }
+    const mine = all.filter((m) => (acct && m.payee?.account === acct) || (gh.state === 'in' && m.payee_github_id === gh.id)).reverse();
+    if (!mine.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, `No milestones pay ${who.join(' or ')} yet.`)); return; }
+    const row = (m) => {
+      const [name] = stateOf(m);
+      const go = () => { location.href = `milestone.html?id=${m.id}`; };
+      return h('tr', { 'data-href': `milestone.html?id=${m.id}`, onclick: go },
+        h('td', {}, h('a', { href: `milestone.html?id=${m.id}` }, `#${m.id}`)),
+        h('td', { class: 'ps-hide-sm' }, `${m.repo_owner}/${m.repo_name}`),
+        h('td', {}, stateChip(name, m)),
+        h('td', {}, `${usdc(BigInt(m.budget_total) - BigInt(m.budget))} of ${usdc(m.budget_total)} USDC`),
+        h('td', {}, m.payee.account));
+    };
+    box.replaceChildren(h('table', { class: 'ps-table' },
+      h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', { class: 'ps-hide-sm' }, 'Repository'), h('th', {}, 'State'), h('th', {}, 'Paid'), h('th', {}, 'Pays'))),
+      h('tbody', {}, ...mine.map(row))));
+  };
+  let last;
+  wallet.onAccount((acct) => { if (acct !== last) { last = acct; show(acct); } });
+}
+myClaims();
 
 if (id !== null && /^\d+$/.test(id)) {
   $('#flow').hidden = false;

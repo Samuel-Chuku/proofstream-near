@@ -104,7 +104,11 @@ textarea.ps-input { font-size: var(--ps-size-body); line-height: var(--ps-lh-bod
 .ps-steps { list-style: none; margin: 0 0 var(--ps-4); padding: 0; border-top: var(--ps-bw-hair) solid var(--ps-border); counter-reset: step; }
 .ps-step { display: grid; grid-template-columns: var(--ps-5) 1fr; gap: var(--ps-2) var(--ps-3); padding: var(--ps-4) 0; border-bottom: var(--ps-bw-hair) solid var(--ps-border); counter-increment: step; }
 .ps-step::before { content: counter(step); font-family: var(--ps-display); font-size: var(--ps-size-data-m); }
-.ps-step-done::before { content: '✓'; }
+.ps-step-done::before {
+  content: '✓'; justify-self: start; align-self: start; padding: 0 var(--ps-1);
+  background: var(--ps-green); color: var(--ps-on-green); border: var(--ps-bw-struct) solid var(--ps-green-deep);
+  font-family: inherit; font-weight: 700; line-height: var(--ps-lh-data-m);
+}
 .ps-step-body { min-width: 0; }
 .ps-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--ps-5); }
 .ps-field { display: flex; flex-direction: column; gap: var(--ps-2); margin-bottom: var(--ps-4); }
@@ -121,7 +125,7 @@ textarea.ps-input { font-size: var(--ps-size-body); line-height: var(--ps-lh-bod
 /* ---- Checking: the mark's bars stepping, never eased ------ */
 .ps-checking { display: inline-flex; align-items: center; gap: var(--ps-2); }
 .ps-checking-cells { display: inline-grid; grid-template-columns: repeat(4, var(--ps-2)); gap: 2px; }
-.ps-checking-cells span { height: var(--ps-3); background: var(--ps-dither-50); border: var(--ps-bw-hair) solid var(--ps-rule); animation: ps-step 960ms var(--ps-step-fast) infinite; }
+.ps-checking-cells span { height: var(--ps-3); background: var(--ps-green); border: var(--ps-bw-hair) solid var(--ps-green-deep); animation: ps-step 960ms var(--ps-step-fast) infinite; }
 .ps-checking-cells span:nth-child(2) { animation-delay: 240ms; }
 .ps-checking-cells span:nth-child(3) { animation-delay: 480ms; }
 .ps-checking-cells span:nth-child(4) { animation-delay: 720ms; }
@@ -219,10 +223,18 @@ textarea.ps-input { font-size: var(--ps-size-body); line-height: var(--ps-lh-bod
 .ps-section > summary::after { content: '▸'; margin-left: auto; color: var(--ps-ink-dim); }
 .ps-section[open] > summary::after { content: '▾'; }
 .ps-section-done { color: var(--ps-ink-dim); margin-left: auto; }
+.ps-section-done:not(:empty) {
+  background: var(--ps-green); color: var(--ps-on-green); border: var(--ps-bw-struct) solid var(--ps-green-deep);
+  font-size: var(--ps-size-data-m); line-height: var(--ps-lh-data-m); font-weight: 700; padding: 0 var(--ps-2);
+}
 .ps-section-body { padding-bottom: var(--ps-5); }
 .ps-blockers { background: var(--ps-invert-bg); color: var(--ps-invert-ink); border: var(--ps-bw-struct) solid var(--ps-rule); box-shadow: var(--ps-shadow-2); padding: var(--ps-4); margin-bottom: var(--ps-4); }
 .ps-blockers ul { margin: var(--ps-2) 0 0; padding-left: var(--ps-4); }
 select.ps-input { appearance: none; }
+.ps-deadline { display: flex; flex-wrap: wrap; gap: var(--ps-2); }
+.ps-deadline .ps-input { min-width: 0; }
+.ps-deadline .ps-input[type='datetime-local'] { flex: 1 1 14ch; }
+.ps-input-quick { flex: 0 0 auto; width: auto; }
 
 /* ---- Milestone page ---- */
 .ps-facts { display: flex; flex-wrap: wrap; gap: var(--ps-3) var(--ps-6); margin: var(--ps-3) 0; }
