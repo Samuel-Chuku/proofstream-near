@@ -9,3 +9,7 @@
 
 /vendor/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Stylesheets must not outlive a deploy in browsers (Cloudflare otherwise lets them keep 4 h).
+/assets/*.css
+  Cache-Control: public, max-age=0, must-revalidate

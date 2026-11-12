@@ -134,6 +134,9 @@ export function toUnits(text) {
   return BigInt(m[1]) * 10n ** BigInt(TOKEN.decimals) + BigInt((m[2] || '').padEnd(TOKEN.decimals, '0'));
 }
 
+/// USDC that reached a contributor, as a green chip: green only for released USDC.
+export const paidAmount = (units) => h('span', { class: 'ps-state ps-state-paid' }, `${usdc(units)} USDC`);
+
 export function amount(units, size = 'm') {
   const [whole, frac] = usdc(units).split('.');
   return h('span', { class: `ps-amount ps-amount-${size} ps-num` },

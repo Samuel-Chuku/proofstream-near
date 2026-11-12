@@ -2,7 +2,7 @@
 // the paid PRs, the AI decisions with their reasons, and every transaction.
 import { CONTRACT, PROJECTS, VERIFIER_PUBLIC_KEY, VERIFIER_FEE, OUTLAYER_API, GAS_300, RELAYER_ACCOUNT } from './config.mjs';
 import { loadIndex, stateOf, decisions, actor, getMilestone } from './chain.mjs';
-import { $, h, fill, shell, amount, usdc, txLink, short, problem, ago, loading, stateChip, sectionRule, verdictText, retryLabel } from './ui.mjs';
+import { $, h, fill, shell, amount, usdc, paidAmount, txLink, short, problem, ago, loading, stateChip, sectionRule, verdictText, retryLabel } from './ui.mjs';
 import * as wallet from './wallet.mjs';
 
 shell('app');
@@ -75,7 +75,7 @@ function decisionCard(d, m) {
   return h('details', { class: `ps-card${d.amount ? ' ps-card-paid' : ''}` },
     h('summary', {}, h('span', { class: 'ps-label' }, `PR #${d.pr}`), outcome,
       h('span', { class: 'ps-detail ps-ellipsis' }, d.reasons[0] ?? ''),
-      h('span', { class: 'ps-caption' }, d.amount ? `${usdc(d.amount)} USDC ▾` : '▾')),
+      h('span', { class: 'ps-caption' }, d.amount ? paidAmount(d.amount) : null, ' ▾')),
     h('div', { class: 'ps-card-body' },
       h('p', { class: 'ps-subhead' }, `Judge · ${verdictText(d.judge)}`),
       d.reasons.length ? h('ul', { class: 'ps-reasons' }, ...d.reasons.map((r) => h('li', {}, r))) : h('p', { class: 'ps-detail' }, 'No reasons recorded.'),
@@ -106,7 +106,7 @@ function describe(e) {
     case 'bind_refused': case 'claim_refused': return e.reason;
     case 'hard_facts_passed': return `PR #${e.pr} at ${short(e.head_sha)}${e.merged ? ', merged' : ', open'}`;
     case 'review_result': return `judge ${verdictText(e.judge)} · verifier ${verdictText(e.verifier)}`;
-    case 'milestone_paid': return `${a(e.amount)} to ${e.to} · ${e.pct}% certified`;
+    case 'milestone_paid': return [paidAmount(e.amount), ` to ${e.to} · ${e.pct}% certified`];
     case 'funder_rejected': return `PR #${e.pr}: ${e.reason}`;
     case 'funder_released': return `${e.pct}%`;
     case 'milestone_refunded': return a(e.amount);
@@ -174,7 +174,7 @@ function prTable(m, mine) {
       const prev = i ? m.parts[i - 1].pct : 0;
       const paidRow = (mine ?? []).flatMap((t) => t.events.filter((e) => e.event === 'milestone_paid' && e.pr === p.pr && e.milestone_id === m.id).map((e) => ({ t, e })))[0];
       return h('tr', {}, h('td', {}, h('a', { href: `https://github.com/${m.repo_owner}/${m.repo_name}/pull/${p.pr}`, target: '_blank', rel: 'noopener' }, `#${p.pr} ↗`)),
-        h('td', {}, `${p.pct}% (+${p.pct - prev})`), h('td', { class: 'ps-num' }, paidRow ? `${usdc(paidRow.e.amount)} USDC` : ''), h('td', {}, paidRow ? txLink(paidRow.t.hash) : ''));
+        h('td', {}, `${p.pct}% (+${p.pct - prev})`), h('td', { class: 'ps-num' }, paidRow ? paidAmount(paidRow.e.amount) : ''), h('td', {}, paidRow ? txLink(paidRow.t.hash) : ''));
     })));
 }
 

@@ -1,6 +1,6 @@
 // The landing page: a live caption and the AI decisions, read straight from the chain.
 import { loadIndex, stats, decisions } from './chain.mjs';
-import { $, h, shell, usdc, ago, verdictText, loading, retryLabel } from './ui.mjs';
+import { $, h, shell, usdc, paidAmount, ago, verdictText, loading, retryLabel } from './ui.mjs';
 
 shell('home', { landing: true });
 
@@ -17,7 +17,7 @@ function render(d) {
   return h('div', {},
     h('div', { class: 'ps-decision-line ps-caption' },
       h('a', { href: `milestone.html?id=${m.id}` }, `${m.repo_owner}/${m.repo_name}`), '·', `PR #${d.pr}`, '·', outcome,
-      d.amount ? h('span', {}, `${usdc(d.amount)} USDC`) : null),
+      d.amount ? paidAmount(d.amount) : null),
     reason ? h('p', { class: 'ps-quote' }, `“${reason}”`) : null,
     h('p', { class: 'ps-caption' }, `JUDGE ${verdictText(d.judge)} · VERIFIER ${verdictText(d.verifier)}`));
 }
