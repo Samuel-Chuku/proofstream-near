@@ -280,7 +280,12 @@ async function myClaims() {
     if (!who.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'Connect a wallet or sign in with GitHub to list your claims.')); return; }
     box.replaceChildren(h('p', { class: 'ps-caption' }, `READING THE CONTRACT FOR ${who.join(' · ')}…`));
     let all;
-    try { all = await readMilestones(); } catch (e) { box.replaceChildren(problem(`Couldn't read the contract: ${e.message}`)); return; }
+    try {
+      indexP ??= loadIndex();
+      all = (await indexP).milestones; // the site's shared index: one request, not one per milestone
+    } catch {
+      try { all = await readMilestones(); } catch (e) { box.replaceChildren(problem(`Couldn't read the contract: ${e.message}`)); return; }
+    }
     const mine = all.filter((m) => (acct && m.payee?.account === acct) || (gh.state === 'in' && m.payee_github_id === gh.id)).reverse();
     if (!mine.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, `No milestones pay ${who.join(' or ')} yet.`)); return; }
     const row = (m) => {
