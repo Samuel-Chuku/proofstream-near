@@ -1,11 +1,13 @@
 // GitHub sign-in for the funder's form, as a Cloudflare Pages Function on the site's own origin.
 // It does what the Arc site's /api/github routes do: trade GitHub's code for a user token with
 // the App's client secret, keep that token in an AES-GCM sealed cookie (no database), and list
-// granted repositories and branches, or create a branch. The secret and the token never reach
-// the browser. Web Crypto only; no packages.
+// granted repositories and branches, create a branch, or create a contributor's bind gist. The
+// secret and the token never reach the browser. Web Crypto only; no packages.
 //
 // Secrets (Pages project settings): GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET,
 // SESSION_SECRET. Plain: GITHUB_APP_SLUG (default "proofstream").
+
+import { CONTRACT } from '../../../js/config.mjs';
 
 const GITHUB = 'https://api.github.com';
 const SESSION = 'ps_gh';
@@ -16,6 +18,11 @@ const SESSION_TTL_S = 8 * 3600;
 const REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._\/-]{1,100}$/;
 const NEXT_PATH = /^\/(?!\/)[A-Za-z0-9._\-\/?=&#%]*$/;
+const NONCE = /^[0-9a-f]{32}$/;
+const NAMED = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
+const IMPLICIT = /^[0-9a-f]{64}$/;
+// The binder reads only this file, and only from a public gist (outlayer/binder/src/rules.rs).
+const PROOF_FILE = 'proofstream-bind.json';
 
 const enc = new TextEncoder();
 const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -65,6 +72,7 @@ function cookies(request) {
 const cookie = (name, value, maxAge) => `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } });
 const safeNext = (n) => (n && NEXT_PATH.test(n) ? n : null);
+const sameSiteJson = (request, url) => request.headers.get('Origin') === url.origin && (request.headers.get('Content-Type') || '').startsWith('application/json');
 
 function redirect(location, setCookies = []) {
   const headers = new Headers({ Location: location, 'Cache-Control': 'no-store' });
@@ -145,12 +153,30 @@ export async function onRequest({ request, env, params }) {
       case 'POST branch': {
         if (!live) return json({ error: 'not_signed_in' }, 401);
         // Only this site may ask: a form or script on another origin can't send this.
-        if (request.headers.get('Origin') !== url.origin || !(request.headers.get('Content-Type') || '').startsWith('application/json')) return json({ error: 'forbidden' }, 403);
+        if (!sameSiteJson(request, url)) return json({ error: 'forbidden' }, 403);
         const { repo, branch, from } = await request.json().catch(() => ({}));
         if (!REPO.test(repo || '') || !BRANCH.test(branch || '') || !BRANCH.test(from || '')) return json({ error: 'bad_request' }, 400);
         const ref = await gh(`/repos/${repo}/git/ref/heads/${encodeURIComponent(from)}`, live.token);
         await gh(`/repos/${repo}/git/refs`, live.token, { method: 'POST', body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: ref.object.sha }) });
         return json({ ok: true, branch });
+      }
+      case 'POST gist': {
+        // The contributor's bind proof, created as them. The binder later checks, inside TDX,
+        // that the gist's owner holds the milestone's GitHub id; this route can't change that.
+        if (!live) return json({ error: 'not_signed_in' }, 401);
+        if (!sameSiteJson(request, url)) return json({ error: 'forbidden' }, 403);
+        const { milestone_id: milestoneId, nonce, account } = await request.json().catch(() => ({}));
+        if (!Number.isSafeInteger(milestoneId) || milestoneId < 0
+          || !NONCE.test(nonce || '') || !(NAMED.test(account || '') || IMPLICIT.test(account || ''))) return json({ error: 'bad_request' }, 400);
+        const content = JSON.stringify({ contract: CONTRACT, milestone_id: milestoneId, nonce, account }, null, 2);
+        try {
+          const gist = await gh('/gists', live.token, { method: 'POST', body: JSON.stringify({ public: true, description: 'proofstream-bind', files: { [PROOF_FILE]: { content } } }) });
+          return json({ id: gist.id, url: gist.html_url });
+        } catch (e) {
+          // An expired sign-in, or one from before the App could write gists: sign in again.
+          if (e.status === 401 || e.status === 403 || e.status === 404) return json({ error: 'gist_permission' }, 403);
+          throw e;
+        }
       }
       default:
         return json({ error: 'not_found' }, 404);

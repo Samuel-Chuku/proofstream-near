@@ -54,13 +54,26 @@ async function step(box, method, body, busyStates, waitingText) {
   return { tx, m, events };
 }
 
-function bindStep(m, nonce) {
+/// Who is signed in with GitHub on this site, if anyone: 'in' (with login and numeric id), 'out',
+/// or 'off' when the site has no GitHub sign-in (the manual gist steps still work).
+async function githubSession() {
+  try {
+    const r = await fetch('/api/github/me', { credentials: 'same-origin' });
+    if (r.status === 200) return { state: 'in', ...(await r.json()) };
+    if (r.status === 401) return { state: 'out' };
+  } catch { /* no functions here (local server): manual steps only */ }
+  return { state: 'off' };
+}
+
+async function bindStep(m, nonce) {
   const box = $('#bind');
   if (m.payee) {
     $('#step-bind').classList.add('ps-step-done');
     box.replaceChildren(h('p', { class: 'ps-detail' }, `Payouts go to ${m.payee.account}, set by gist ${m.payee.gist_id}.`));
     return;
   }
+  const gh = await githubSession();
+  const here = `${location.pathname}${location.search}`;
   const account = h('input', { class: 'ps-input', id: 'acct', placeholder: 'your-name.testnet', autocomplete: 'off', spellcheck: 'false' });
   const file = h('pre', { class: 'ps-code' });
   const gist = h('input', { class: 'ps-input', placeholder: 'https://gist.github.com/you/…', autocomplete: 'off' });
@@ -69,27 +82,74 @@ function bindStep(m, nonce) {
   const render = () => { file.textContent = content(); };
   account.addEventListener('input', render);
   render();
-  const send = h('button', { class: 'ps-button', type: 'button' }, 'Bind');
-  send.addEventListener('click', async () => {
+  const validAccount = () => {
     const acct = account.value.trim();
-    if (!NAMED.test(acct) && !IMPLICIT.test(acct)) { out.replaceChildren(problem('That isn\'t a NEAR account id.')); return; }
-    const gid = (gist.value.match(/[0-9a-f]{20,64}/i) || [])[0]?.toLowerCase();
-    if (!gid) { out.replaceChildren(problem('Paste the gist\'s URL or id.')); return; }
-    send.disabled = true;
+    if (NAMED.test(acct) || IMPLICIT.test(acct)) return acct;
+    out.replaceChildren(problem('That isn\'t a NEAR account id.'));
+    return null;
+  };
+  const bindWith = async (gid, buttons) => {
+    buttons.forEach((b) => { b.disabled = true; });
     const r = await step(out, 'bind_payee', { milestone_id: Number(id), gist_id: gid }, [], 'The binder is reading your gist inside TDX…');
-    send.disabled = false;
+    buttons.forEach((b) => { b.disabled = false; });
     if (!r) return;
     const refused = r.events.find((e) => e.event === 'bind_refused');
     if (refused) { out.replaceChildren(problem(explain(refused.reason)), txLink(r.tx)); return; }
     load();
+  };
+
+  const send = h('button', { class: 'ps-button', type: 'button' }, 'Bind');
+  const quick = h('button', { class: 'ps-button ps-button-primary', type: 'button' }, '[ Bind with GitHub ]');
+  send.addEventListener('click', async () => {
+    if (!validAccount()) return;
+    const gid = (gist.value.match(/[0-9a-f]{20,64}/i) || [])[0]?.toLowerCase();
+    if (!gid) { out.replaceChildren(problem('Paste the gist\'s URL or id.')); return; }
+    bindWith(gid, [send, quick]);
   });
+  quick.addEventListener('click', async () => {
+    const acct = validAccount();
+    if (!acct) return;
+    quick.disabled = true;
+    out.replaceChildren(checking('Posting your bind gist on GitHub…'));
+    let res;
+    try {
+      res = await fetch('/api/github/gist', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ milestone_id: Number(id), nonce, account: acct }) });
+    } catch { res = null; }
+    quick.disabled = false;
+    const body = res ? await res.json().catch(() => ({})) : {};
+    if (!res || !res.ok || !body.id) {
+      const again = body.error === 'gist_permission' || body.error === 'not_signed_in';
+      out.replaceChildren(problem(again ? 'GitHub needs you to sign in again so this site may post the gist.' : 'GitHub didn\'t create the gist.',
+        again ? h('a', { href: `/api/github/login?next=${encodeURIComponent(here)}` }, 'Sign in with GitHub again') : 'Post it yourself with the steps below.', 'NOT YET'));
+      return;
+    }
+    out.replaceChildren(h('p', { class: 'ps-caption' }, 'GIST POSTED · ', h('a', { href: body.url, target: '_blank', rel: 'noopener' }, 'view it ↗')));
+    bindWith(body.id, [send, quick]);
+  });
+
+  let fast = null;
+  if (gh.state === 'in' && gh.id === m.payee_github_id) {
+    fast = [h('p', { class: 'ps-detail' }, `2. Signed in as ${gh.login}. One click posts the bind gist as you and binds the account:`), h('div', { class: 'ps-actions' }, quick)];
+  } else if (gh.state === 'in') {
+    fast = [h('p', { class: 'ps-detail' }, `2. You're signed in as ${gh.login}, but this milestone pays GitHub id ${m.payee_github_id}. `,
+      h('a', { href: `/api/github/logout?next=${encodeURIComponent(here)}` }, 'Sign out'), ' and sign in as that account.')];
+  } else if (gh.state === 'out') {
+    fast = [h('p', { class: 'ps-detail' }, '2. Sign in as the milestone\'s GitHub account, and the site posts the bind gist for you:'),
+      h('div', { class: 'ps-actions' }, h('a', { class: 'ps-button ps-button-primary', href: `/api/github/login?next=${encodeURIComponent(here)}` }, '[ Sign in with GitHub ]'))];
+  }
+  const manual = [
+    h('p', { class: 'ps-detail' }, 'Create a ', h('strong', {}, 'public'), ' gist on GitHub, signed in as the milestone\'s contributor, with one file named ', h('code', {}, 'proofstream-bind.json'), ' holding exactly:'),
+    file, h('div', { class: 'ps-actions' }, copyChip(content, 'COPY FILE'), h('a', { class: 'ps-chip ps-chip-link', href: 'https://gist.github.com/', target: '_blank', rel: 'noopener' }, 'NEW GIST ↗')),
+    h('p', { class: 'ps-detail' }, 'Paste the gist\'s URL:'), h('div', { class: 'ps-field' }, gist),
+    h('div', { class: 'ps-actions' }, send)];
   box.replaceChildren(
     h('p', { class: 'ps-detail' }, '1. The NEAR account to be paid (it must exist; a 64-hex implicit account is created for you):'),
     h('div', { class: 'ps-field' }, account),
-    h('p', { class: 'ps-detail' }, '2. Create a ', h('strong', {}, 'public'), ' gist on GitHub, signed in as the milestone\'s contributor, with one file named ', h('code', {}, 'proofstream-bind.json'), ' holding exactly:'),
-    file, h('div', { class: 'ps-actions' }, copyChip(content, 'COPY FILE'), h('a', { class: 'ps-chip ps-chip-link', href: 'https://gist.github.com/', target: '_blank', rel: 'noopener' }, 'NEW GIST ↗')),
-    h('p', { class: 'ps-detail' }, '3. Paste the gist\'s URL:'), h('div', { class: 'ps-field' }, gist),
-    h('div', { class: 'ps-actions' }, send), out);
+    ...(fast ?? []),
+    fast
+      ? h('details', { class: 'ps-section' }, h('summary', {}, h('span', { class: 'ps-caption' }, 'OR POST THE GIST YOURSELF')), ...manual)
+      : h('div', {}, h('p', { class: 'ps-detail' }, '2. Post the gist yourself:'), ...manual),
+    out);
 }
 
 function claimStep(m, name, fields) {
@@ -168,7 +228,7 @@ async function load() {
     h('dt', {}, 'Milestone'), h('dd', { class: 'ps-detail' }, m.milestone_text),
     h('dt', {}, 'Budget'), h('dd', {}, `${usdc(m.budget_total)} USDC · ${m.certified_pct}% certified`),
     h('dt', {}, 'State'), h('dd', {}, name));
-  bindStep(m, await getBindNonce(Number(id)));
+  await bindStep(m, await getBindNonce(Number(id)));
   claimStep(m, name, fields);
   reviewStep(m, name, fields);
 }
