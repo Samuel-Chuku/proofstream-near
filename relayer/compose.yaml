@@ -1,5 +1,6 @@
 # Relayer behind Caddy. Values come from relayer/.env (untracked; see .env.example);
-# the key comes from secrets/relayer_key.json (untracked; see DEPLOY.md).
+# the key comes from secrets/relayer_key.json and the GitHub token from secrets/github_token.txt
+# (both untracked; see DEPLOY.md).
 services:
   relayer:
     build: .
@@ -12,6 +13,7 @@ services:
       PORT: "8080"
     secrets:
       - relayer_key
+      - github_token
     user: node
     read_only: true
     cap_drop: [ALL]
@@ -54,3 +56,6 @@ volumes:
 secrets:
   relayer_key:
     file: ./secrets/relayer_key.json
+  # Read-only GitHub token for auto-claim; an empty file turns auto-claim off.
+  github_token:
+    file: ./secrets/github_token.txt

@@ -1,14 +1,16 @@
 // Entry point: read config and the key file, check the account and OutLayer's prices, serve.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { AI_LIMITS, COMPUTE_PER_AI_RUN, COMPUTE_PER_FACTS_RUN, CONTRACT, FACTS_LIMITS } from './policy.mjs';
 import { makeRpc } from './rpc.mjs';
+import { createAutoclaim, makeGithub } from './autoclaim.mjs';
 import { createHandler } from './server.mjs';
 import { base58Encode, loadSigner } from './tx.mjs';
 
 const OUTLAYER = 'outlayer.testnet';
 const DEFAULT_RPCS = 'https://rpc.testnet.near.org,https://test.rpc.fastnear.com';
 const DEFAULT_KEY_FILE = '/run/secrets/relayer_key';
+const DEFAULT_GITHUB_TOKEN_FILE = '/run/secrets/github_token';
 const DEFAULT_PORT = 8080;
 const YOCTO_PER_MILLINEAR = 10n ** 21n;
 const MILLINEAR = /^[0-9]{1,6}$/;
@@ -61,6 +63,17 @@ async function main() {
   createServer(handle).listen(port, () =>
     console.log(JSON.stringify({ t: new Date().toISOString(), event: 'listening', port, account: accountId, contract: CONTRACT })),
   );
+
+  // Auto-claim runs only when a GitHub token is provided (read-only, public repositories).
+  const tokenFile = process.env.GITHUB_TOKEN_FILE ?? DEFAULT_GITHUB_TOKEN_FILE;
+  const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '';
+  const log = (event, fields) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
+  if (!token) {
+    log('autoclaim_off', { reason: 'no GitHub token file' });
+  } else {
+    log('autoclaim_on', {});
+    createAutoclaim({ view: handle.view, submit: handle.submit, closedPrs: makeGithub(token), log }).run();
+  }
 }
 
 main().catch((e) => {

@@ -145,7 +145,7 @@ export function createHandler(deps) {
     });
   }
 
-  return async function handle(httpReq, res) {
+  async function handle(httpReq, res) {
     const origin = httpReq.headers.origin;
     const path = new URL(httpReq.url, 'http://relayer').pathname;
     const method = path.slice(1);
@@ -184,5 +184,9 @@ export function createHandler(deps) {
       log('error', { method: isMethod(method) ? method : undefined, error: e.data?.cause?.name ?? e.name });
       return reply(res, 502, { refused: 'upstream_error' }, origin);
     }
-  };
+  }
+  // Auto-claim sends through the same queue, prechecks, limits and daily cap.
+  handle.submit = (req) => enqueue(() => submit(req));
+  handle.view = view;
+  return handle;
 }

@@ -48,6 +48,15 @@ RELAYER_DOMAIN=relayer.proofstream.site
 DAILY_CAP_MILLINEAR=2000
 ```
 
+## Auto-claim (GitHub token)
+
+When a bound contributor's PR merges into the milestone's branch, the relayer claims it and then asks for the review, so the contributor doesn't press anything. It polls each open milestone's repository every 15 s. Unchanged answers come back as 304 and don't count against GitHub's rate limit, but only on authenticated requests, so it needs a token:
+
+1. GitHub → Settings → Developer settings → Fine-grained tokens → **Generate new token**. Repository access: **Public repositories (read-only)**. Add no permissions.
+2. On the VPS, put the token in `secrets/github_token.txt`, then `sudo chown 1000:1000 secrets/github_token.txt && sudo chmod 600 secrets/github_token.txt`.
+
+An empty file turns auto-claim off (`touch secrets/github_token.txt`). It only claims PRs merged after the relayer started, and only for milestones in Funded with a bound payee whose GitHub id authored the PR. The manual claim on the site still works.
+
 ## Run
 
 ```bash
