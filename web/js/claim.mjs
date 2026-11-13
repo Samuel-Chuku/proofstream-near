@@ -209,7 +209,8 @@ function claimStep(m, name, fields) {
   if (!m.payee) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'after binding')); return; }
   if (['HardFactsPassed', 'Reviewing', 'Held', 'PayingOut', 'Paid', 'PayoutFailed'].includes(name)) {
     $('#step-claim').classList.add('ps-step-done');
-    box.replaceChildren(doneLine('claim', fields.pr ? `PR #${fields.pr} passed the hard facts: merged, right author, checks passed.` : 'Done.'));
+    const prNo = fields.pr ?? fields.part?.pr; // PayingOut and PayoutFailed carry it in `part`
+    box.replaceChildren(doneLine('claim', prNo ? `PR #${prNo} passed the hard facts: merged, right author, checks passed.` : 'Done.'));
     return;
   }
   if (name === 'Checking') { box.replaceChildren(working(`The checker is reading PR #${fields.pr} inside TDX…`, 'claim_started')); return; }
@@ -241,7 +242,12 @@ function claimStep(m, name, fields) {
 
 function reviewStep(m, name, fields) {
   const box = $('#review');
-  if (name === 'Paid' || name === 'PayingOut') {
+  // budget and certified_pct only move once the transfer lands, so read the share in flight.
+  if (name === 'PayingOut') {
+    box.replaceChildren(working(`Certified ${fields.part.pct}%. Sending ${usdc(fields.amount)} USDC to ${m.payee.account}…`, 'review'));
+    return;
+  }
+  if (name === 'Paid') {
     $('#step-review').classList.add('ps-step-done');
     box.replaceChildren(doneLine('review', `Certified ${m.certified_pct}%. ${usdc(BigInt(m.budget_total) - BigInt(m.budget))} USDC paid to ${m.payee.account}.`));
     return;
@@ -308,6 +314,10 @@ async function load() {
 }
 
 /// Every milestone paying the connected wallet, or the signed-in GitHub account, each linking to its page.
+const INDEX_WAIT_MS = 10000; // the shared index answers in under a second when it's up
+const LIVE_WAIT_MS = 30000;  // live re-reads of the candidates, all together
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function myClaims() {
   const box = $('#mine-list');
   const gh = await githubSession();
@@ -315,24 +325,43 @@ async function myClaims() {
     const who = [acct, gh.state === 'in' ? `GitHub ${gh.login}` : null].filter(Boolean);
     if (!who.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, 'Connect a wallet or sign in with GitHub to list your claims.')); return; }
     box.replaceChildren(h('p', { class: 'ps-caption' }, `READING THE CONTRACT FOR ${who.join(' · ')}…`));
-    let all;
-    // The shared index picks the candidates in one request; each is then read live, since the
-    // index can trail the chain (a payout or a bind a minute old). Milestones newer than the
-    // index, and unbound ones that may have just been bound, are candidates too.
+    const isMine = (m) => (acct && m.payee?.account === acct) || (gh.state === 'in' && m.payee_github_id === gh.id);
+    // Draw from the shared index at once, then again from live reads, since the index can trail
+    // the chain (a bind or a payout a minute old). The live reads share the RPC with the rest of
+    // the page, so they get a time cap: if they run out, the index's list stays up.
+    let listed = null;
     try {
       indexP ??= loadIndex();
-      const listed = (await indexP).milestones;
-      const ids = listed.filter((m) => !m.payee || m.payee.account === acct || (gh.state === 'in' && m.payee_github_id === gh.id)).map((m) => m.id);
-      for (let next = listed.length; next < listed.length + 20; next++) {
-        if (!(await getMilestone(next))) break;
-        ids.push(next);
-      }
-      all = (await Promise.all(ids.map(async (i) => ({ id: i, ...(await getMilestone(i)) })))).filter((m) => m.repo_owner);
+      listed = (await Promise.race([indexP, wait(INDEX_WAIT_MS)]))?.milestones ?? null;
+    } catch { /* no index: live reads only */ }
+    if (listed) draw(listed.filter(isMine), who, true);
+    let all;
+    try {
+      all = await Promise.race([liveCandidates(listed, isMine), wait(LIVE_WAIT_MS).then(() => { throw new Error('timed out'); })]);
     } catch {
-      try { all = await readMilestones(); } catch (e) { box.replaceChildren(problem(`Couldn't read the contract: ${e.message}`)); return; }
+      if (listed) return;
+      try { all = await readMilestones(); } catch (e2) { box.replaceChildren(problem(`Couldn't read the contract: ${e2.message}`)); return; }
     }
-    const mine = all.filter((m) => (acct && m.payee?.account === acct) || (gh.state === 'in' && m.payee_github_id === gh.id)).reverse();
-    if (!mine.length) { box.replaceChildren(h('p', { class: 'ps-caption' }, `No milestones pay ${who.join(' or ')} yet.`)); return; }
+    draw(all.filter(isMine), who, false);
+  };
+  /// Every unbound or matching milestone in the index, plus ids newer than it, read live.
+  const liveCandidates = async (listed, isMine) => {
+    if (!listed) return readMilestones();
+    const ids = listed.filter((m) => !m.payee || isMine(m)).map((m) => m.id);
+    for (let next = listed.length; next < listed.length + 20; next++) {
+      if (!(await getMilestone(next))) break;
+      ids.push(next);
+    }
+    return (await Promise.all(ids.map(async (i) => ({ id: i, ...(await getMilestone(i)) })))).filter((m) => m.repo_owner);
+  };
+  const draw = (found, who, early) => {
+    const box = $('#mine-list');
+    const mine = [...found].reverse();
+    if (!mine.length) {
+      // An empty early list may only mean the index trails a fresh bind: keep reading.
+      if (!early) box.replaceChildren(h('p', { class: 'ps-caption' }, `No milestones pay ${who.join(' or ')} yet.`));
+      return;
+    }
     const row = (m) => {
       const [name] = stateOf(m);
       const go = () => { location.href = `milestone.html?id=${m.id}`; };

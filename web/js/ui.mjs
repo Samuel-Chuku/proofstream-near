@@ -48,7 +48,6 @@ export function shell(active, { landing = false } = {}) {
   const toggle = h('button', { class: 'ps-theme-toggle', type: 'button', 'aria-label': 'Switch light or dark theme' }, isDark() ? '☼' : '☾');
   toggle.addEventListener('click', () => { setTheme(isDark() ? 'light' : 'dark'); toggle.textContent = isDark() ? '☼' : '☾'; });
   const chain = h('span', { class: 'ps-chain-switch', role: 'group', 'aria-label': 'Which chain' },
-    h('a', { href: ARC_SITE, class: 'ps-chip ps-chip-link' }, 'ARC'),
     h('span', { class: 'ps-chip ps-chip-current', 'aria-current': 'true' }, 'NEAR'));
   const nav = h('nav', { class: 'ps-nav' });
   if (landing) {
