@@ -162,7 +162,8 @@ function evidence(index, m) {
       h('p', { class: 'ps-subhead' }, 'By the contract, the relayer and the contributor'), txRows(automated),
       h('p', { class: 'ps-subhead' }, 'By the funder'), txRows(human)],
     fee: [h('p', { class: 'ps-body' }, h('strong', {}, `${usdc(BigInt(VERIFIER_FEE) * BigInt(opinions))} USDC`), ` for ${opinions} second opinion${opinions === 1 ? '' : 's'}, from the judge owner's OutLayer payment key to the verifier's owner: one agent paying another for a service. Each review pays the judge's owner that fee from the milestone's review budget; the judge passes it on only when it asks for a second opinion.`),
-      h('p', { class: 'ps-caption' }, `${refused} REVIEW${refused === 1 ? '' : 'S'} WHERE THE JUDGE OBJECTED: NO SECOND OPINION BOUGHT, THE FEE STAYED WITH THE JUDGE'S OWNER`)],
+      // Only when it happened: "0 reviews … no second opinion bought" read as "nothing was bought".
+      refused ? h('p', { class: 'ps-caption' }, `THE JUDGE OBJECTED IN ${refused} REVIEW${refused === 1 ? '' : 'S'}: NO SECOND OPINION WAS BOUGHT FOR ${refused === 1 ? 'IT' : 'THOSE'}, SO THE FEE STAYED WITH THE JUDGE'S OWNER`) : null],
   };
 }
 
