@@ -4,7 +4,7 @@ Milestone payouts for open-source work, released by verified facts and two indep
 
 A funder escrows a budget in a NEAR contract against one milestone of a GitHub repository. A contributor gets paid when a merged pull request passes the **hard facts**, checked inside an Intel TDX enclave on OutLayer, and **two AI reviewers** from different model vendors and owners both certify how much of the milestone it completes. The contract pays the **lower** of the two shares, so half a job earns half the budget. No AI verdict can move money on its own.
 
-> **Status (2026-11-11):** live on NEAR testnet. The contract `proofstream-v1.testnet` runs the reproducible build of commit `068742e`, and 8 milestones have run on it: paid in full, paid in part, refused, held, released by the funder and refunded. Every one is listed with its transactions in [docs/EVIDENCE.md](docs/EVIDENCE.md). Testnet only, with free test USDC.
+> **Status (2026-11-13):** live on NEAR testnet. The contract `proofstream-v1.testnet` runs the reproducible build of commit `068742e`, and 12 milestones have run on it: paid in full, paid in part, refused, held, released by the funder and refunded. In the recorded demo (milestone #11), 1,500 test USDC reached the contributor 71 s after the merge, with no clicks in between. Every one is listed with its transactions in [docs/EVIDENCE.md](docs/EVIDENCE.md). Testnet only, with free test USDC.
 
 ## Try it
 
@@ -36,7 +36,7 @@ A funder escrows a budget in a NEAR contract against one milestone of a GitHub r
    - **Waits for the funder:** any objection, two shares more than 30 points apart, or no new progress. The funder can release a share they choose, or reject the PR.
    - **Refund:** after the deadline, the funder takes back whatever was never certified.
 
-Contributors without NEAR can use the relayer ([relayer/](relayer/)). It submits only `bind_payee`, `claim` and `review`, with fixed deposits, and checks the contract's state first. It can refuse to send a request, but it can't redirect money. Anyone with NEAR can call the contract directly instead.
+Contributors without NEAR can use the relayer ([relayer/](relayer/)). It submits only `bind_payee`, `claim` and `review`, with fixed deposits, and checks the contract's state first. Once a contributor is bound, it also watches the repository and sends the claim and review itself when their pull request merges (auto-claim). It can refuse to send a request, but it can't redirect money. Anyone with NEAR can call the contract directly instead.
 
 ## Claims and how to check them
 
@@ -50,7 +50,7 @@ None of these needs keys or spends anything.
 | The AI review refuses unsigned, altered, inconsistent or off-commit answers | `cd outlayer/ai-review && cargo test` | `50 passed` |
 | The checker fails closed on every hard fact | `cd outlayer/checker && cargo test` | `36 passed` |
 | The binder accepts only the GitHub id holder's gist for this contract and milestone | `cd outlayer/binder && cargo test` | `14 passed` |
-| The relayer can only send what the contract would accept | `node --test relayer/test/*.test.mjs` | `pass 26` |
+| The relayer can only send what the contract would accept | `node --test relayer/test/*.test.mjs` | `pass 43` |
 | Two claims racing for one payout: one pays, one is refused | `scripts/race-demo.sh` | `Claim 2 was refused 86 blocks before claim 1 finished its check.` |
 | A forged AI verdict is rejected inside the enclave | `scripts/tamper-demo.sh` | `signature_text_mismatch, no verdict` |
 | An execution ran the pinned build on approved TDX hardware, signed by Intel | `python3 -I scripts/verify-execution.py 3BBEpZ16fXSUDMp3bRza4JXpeSb6gPNaj3Gsr8RWpwKo` | `PASS: 8 passed, 0 failed, 0 skipped` |
@@ -127,13 +127,32 @@ The relayer has its own settings and key file; see [relayer/DEPLOY.md](relayer/D
 - **Fund milestones from any chain.** USDC arrives through NEAR Intents' `customRecipientMsg`, which calls the contract's `ft_transfer_call`. This needs an exact-output quote and a funding message that names the funder, because the sender is Intents' withdrawal account. NEAR Intents marks this path as experimental.
 - **Optional yield on escrowed budgets.** An opt-in setting would supply idle milestone budgets to RHEA Lending through `@rhea-finance/cross-chain-sdk` and withdraw them before payout. Like any DeFi integration, it would be off by default, and the funder chooses whether to use it.
 
-## Credits
+## Built at NEAR HACKATHON
 
-- **Front end:** committed by [eso8484](https://github.com/eso8484) (ENEJO SUNDAY OCHE), on the ProofStream design system from the Arc entry.
+- **Window:** this repository was created for the hackathon. Its first commit, [`f8f3820`](https://github.com/Samuel-Chuku/proofstream-near/commit/f8f3820), is dated 2026-11-06, so every commit in it falls inside the hackathon window (2026-10-19 to 2026-11-14). There is no pre-hackathon baseline here; the [full history](https://github.com/Samuel-Chuku/proofstream-near/commits/main) is the hackathon work.
+- **Carried over from the Arc entry** (see Prior work below): the product idea, and the ProofStream design system files in [web/assets/](web/assets/) (`tokens.css`, `fonts.css`, the Departure Mono font under its OFL licence, the brand mark). No contract, agent or relayer code was carried over: the NEAR contract, the three OutLayer programs, the relayer and the site were written here.
+
+## Libraries, services and tools
+
+- **Contract:** `near-sdk` 5.30.1, `serde_json`; tests with `near-workspaces` 0.24.0 and `tokio`. Built reproducibly in `sourcescan/cargo-near:0.22.0-rust-1.99.1`.
+- **OutLayer programs:** `serde`, `serde_json`, `k256` 0.14.0, `sha2` 0.11.1, `sha3` 0.12.0, `wit-bindgen` 0.36.0 (for OutLayer's signing keys).
+- **Relayer:** Node 22 standard library only, no npm packages. Runs in `node:22-slim` behind Caddy 2.11.9, both pinned by digest.
+- **Site:** no framework and no build step. The only third-party code is `@hot-labs/near-connect` 0.12.0, vendored with its hash ([web/vendor/README.md](web/vendor/README.md)).
+- **Services:** NEAR testnet, OutLayer (Intel TDX execution, encrypted secrets, signing keys), NEAR AI Cloud (GLM for the judge, Qwen for the verifier), GitHub's API, Cloudflare Pages, and FastNEAR's transaction index (NearBlocks as fallback) for the site's history.
+- **AI assistance:** the team used Claude Code (Anthropic) as a coding assistant and supervised its work throughout. The team set the idea, the design and the contract's rules, made every key decision, and reviewed what the assistant produced, checking it against the tests and on-chain runs listed above.
+
+## Team
+
+- **Enejo Sunday Oche** ([eso8484](https://github.com/eso8484)): team lead; the front end, on the ProofStream design system from the Arc entry.
+- **Samuel Chuku** ([Samuel-Chuku](https://github.com/Samuel-Chuku)): the contract, the OutLayer programs and the relayer.
 
 ## Prior work and the other entry
 
 - **Prior work:** [ProofStream on Arc](https://github.com/Samuel-Chuku/Proof-Stream), where an agent signed an attestation and paid a second agent over x402 for a second opinion. This entry moves the facts and the judgement into attested enclaves, pins every build per milestone, and lets the contract, not an agent's key, decide.
-- **The other entry:** Stead, Samuel's other NEAR HACKATHON entry. The two share no code, accounts or keys.
+- **The other entry:** Samuel Chuku also takes part solo with **Stead**, a separate NEAR HACKATHON project. The two share no code, accounts or keys.
+
+## License
+
+[MIT](LICENSE).
 
 **Tracks:** Real-World Money, AI Security & Defense, Agent Economy, Privacy & Private AI.
