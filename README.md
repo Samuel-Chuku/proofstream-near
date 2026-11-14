@@ -149,7 +149,9 @@ The relayer has its own settings and key file; see [relayer/DEPLOY.md](relayer/D
 ## Prior work and the other entry
 
 - **Prior work:** [ProofStream on Arc](https://github.com/Samuel-Chuku/Proof-Stream), where an agent signed an attestation and paid a second agent over x402 for a second opinion. This entry moves the facts and the judgement into attested enclaves, pins every build per milestone, and lets the contract, not an agent's key, decide.
-- **The other entry:** Samuel Chuku also takes part solo with **Stead**, a separate NEAR HACKATHON project ([repository](https://github.com/Samuel-Chuku/stead), [site](https://usestead.xyz)). The two share no code, accounts or keys.
+- **The other entry:** Samuel Chuku, a contributor to this project, is also building **Stead** as a solo entry, a separate NEAR HACKATHON project. The two share no code, accounts or keys.
+  - **Stead repository:** https://github.com/Samuel-Chuku/stead
+  - **Website:** https://usestead.xyz
 
 ## License
 
