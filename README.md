@@ -12,6 +12,7 @@ A funder escrows a budget in a NEAR contract against one milestone of a GitHub r
 - **Contract:** [`proofstream-v1.testnet`](https://testnet.nearblocks.io/address/proofstream-v1.testnet). No admin, setter or upgrade method.
 - **Relayer:** `relayer.proofstream.site`, for contributors without NEAR (see below).
 - **Test USDC:** `usdc.fakes.testnet` mints to anyone; the site's getting-started panel does it in one wallet click.
+- **Uptime:** the site, relayer and contract stay up through judging, until at least 2026-11-18.
 
 ## How a milestone pays
 
@@ -41,6 +42,8 @@ Contributors without NEAR can use the relayer ([relayer/](relayer/)). It submits
 ## Claims and how to check them
 
 None of these needs keys or spends anything.
+
+The contract's first `cargo test` downloads the NEAR sandbox binary (a near-workspaces build step), so it needs network once. Offline, set `NEAR_SANDBOX_BIN_PATH` to any existing file to run `--lib` tests; the sandbox tests need the real binary.
 
 | Claim | Command | Expected |
 |---|---|---|
